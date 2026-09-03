@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-chat-bridge"
+version = "0.1.0"
+description = "Run-scoped bridge from local callers to browser-hosted chat UIs"
+requires-python = ">=3.12"
+dependencies = ["playwright>=1.55"]
+
+[project.scripts]
+browser-chat-bridge = "browser_chat_bridge.bridge_server:main"
+browser-chat-driver = "browser_chat_bridge.driver_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
