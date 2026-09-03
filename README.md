@@ -37,3 +37,13 @@ mode, so production remains on Chromium. See `docs/OBSCURA_SHADOW_20260904.md`.
 
 See `docs/DESIGN.md` and `docs/GEMINI_DOM_CONTRACT_20260904.md`.
 
+## DSH integration handoff
+
+For a fresh AI or DSH orchestrator that should implement the remaining DSH
+integration end-to-end, including live verification and independent review, use:
+
+- `docs/DSH_ORCHESTRATOR_HANDOFF_20260904.md` — current contracts, design
+  constraints, acceptance matrix, and review/completion gates.
+- `docs/DSH_ORCHESTRATOR_PROMPT_20260904.md` — copyable top-level execution
+  prompt with the recommended parallel lanes and model-depth assignments.
+
