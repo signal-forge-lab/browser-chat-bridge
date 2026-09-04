@@ -30,6 +30,8 @@ ENHANCED_MODE_LABEL = "強化版思考モード"
 FIXED_MODEL_PRIMARY = "Flash"
 FIXED_MODEL_SECONDARY = "拡張"
 CDP_CONNECT_TIMEOUT_MS = 30_000
+MODEL_SETUP_TIMEOUT_S = 30.0
+BOUND_HISTORY_TIMEOUT_S = 30.0
 
 
 def normalize_text(value: str) -> str:
@@ -72,6 +74,29 @@ def query_prompt_matches(line_texts: list[str], expected: str) -> bool:
     instead of weakening to substring/whitespace matching.
     """
     return composer_prompt_matches(line_texts, expected)
+
+
+def bound_history_hydrated(
+    user_count: int,
+    response_count: int,
+    has_user_text: bool,
+    has_response_content: bool,
+    response_complete: bool,
+) -> bool:
+    """Whether an existing durable conversation is safe to continue.
+
+    Gemini can expose the composer before its prior turns have hydrated. A
+    bound run must never submit into that transient empty-looking state: wait
+    until at least one complete historical user/model pair is structurally
+    present. No message content is inspected or normalized here.
+    """
+    return (
+        user_count > 0
+        and user_count == response_count
+        and has_user_text
+        and has_response_content
+        and response_complete
+    )
 
 
 def fixed_model_selected(button_text: str) -> bool:
@@ -163,6 +188,7 @@ class GeminiDriver:
                 context = browser.contexts[0]
                 target_url = str(requested_url or f"{NEW_CHAT_URL}#bcb-{uuid.uuid4().hex}")
                 page = self._find_page(context, target_url) if requested_url is not None else None
+                page_created_here = page is None
                 if page is None:
                     if self.backend_kind == "obscura":
                         # Obscura is an automation-only headless process, so a
@@ -191,6 +217,14 @@ class GeminiDriver:
                                 page = self._wait_find_page(browser.contexts[0], target_url)
                 if page is None:
                     return DriverResult("TARGET_LOST", error="could not create or resolve Gemini page").as_dict()
+                if requested_url is not None and not self._wait_for_bound_history(page):
+                    conversation_id = parse_conversation_id(str(requested_url))
+                    return DriverResult(
+                        "CONVERSATION_LOST",
+                        conversation_id=conversation_id,
+                        conversation_url=str(requested_url),
+                        error="bound Gemini conversation history did not hydrate before dispatch",
+                    ).as_dict()
                 dispatch = self._dispatch_page_turn(page, prompt)
                 if isinstance(dispatch, DriverResult):
                     # A fresh marker tab is automation-owned. If dispatch never
@@ -198,11 +232,8 @@ class GeminiDriver:
                     # readiness failure cannot accumulate stale /app tabs. All
                     # post-click uncertainty is classified AMBIGUOUS and must
                     # remain available for reconciliation instead.
-                    if requested_url is None and dispatch.status != "AMBIGUOUS":
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
+                    if page_created_here and dispatch.status != "AMBIGUOUS":
+                        self._close_page_quietly(page)
                     return dispatch.as_dict()
 
                 if requested_url is None:
@@ -255,13 +286,20 @@ class GeminiDriver:
                         error="user turn persisted but durable conversation id was not resolved",
                     ).as_dict()
                 conversation_url = f"{GEMINI_ORIGIN}/app/{conversation_id}"
-                return self._wait_response(
+                response = self._wait_response(
                     page,
                     dispatch.baseline_responses,
                     conversation_id,
                     conversation_url,
                     prompt,
-                ).as_dict()
+                )
+                # A successfully completed durable conversation can always be
+                # reopened by its URL on the next turn. Close only pages this
+                # invocation created; never close a pre-existing Human tab.
+                # Ambiguous/timeout paths remain open for reconciliation.
+                if page_created_here and response.status == "COMPLETED":
+                    self._close_page_quietly(page)
+                return response.as_dict()
             finally:
                 # connect_over_cdp disconnects this client only; it does not own
                 # the attached Chrome/Obscura process.
@@ -269,6 +307,13 @@ class GeminiDriver:
                     browser.close()
                 except Exception:
                     pass
+
+    @staticmethod
+    def _close_page_quietly(page) -> None:
+        try:
+            page.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _find_page(context, url: str):
@@ -286,7 +331,7 @@ class GeminiDriver:
         return None
 
     def _wait_find_page(self, context, url: str):
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + MODEL_SETUP_TIMEOUT_S
         while time.monotonic() < deadline:
             page = self._find_page(context, url)
             if page is not None:
@@ -314,6 +359,39 @@ class GeminiDriver:
             try:
                 composer = page.locator(COMPOSER_SELECTOR)
                 if composer.count() == 1 and composer.is_visible():
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.2)
+        return False
+
+    def _wait_for_bound_history(self, page) -> bool:
+        deadline = time.monotonic() + BOUND_HISTORY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            try:
+                users = page.locator(USER_QUERY_SELECTOR)
+                responses = page.locator(MODEL_RESPONSE_SELECTOR)
+                user_count = users.count()
+                response_count = responses.count()
+                has_user_text = (
+                    user_count > 0
+                    and users.last.locator(USER_QUERY_TEXT_SELECTOR).count() > 0
+                )
+                has_response_content = (
+                    response_count > 0
+                    and responses.last.locator(MESSAGE_CONTENT_SELECTOR).count() == 1
+                )
+                response_complete = (
+                    response_count > 0
+                    and responses.last.locator(COMPLETE_FOOTER_SELECTOR).count() > 0
+                )
+                if bound_history_hydrated(
+                    user_count,
+                    response_count,
+                    has_user_text,
+                    has_response_content,
+                    response_complete,
+                ):
                     return True
             except Exception:
                 pass
@@ -348,7 +426,7 @@ class GeminiDriver:
         if fixed_model_selected(button.inner_text()):
             return True
 
-        button.click()
+        button.click(timeout=5_000)
         items = page.locator(MODEL_ITEM_SELECTOR)
         try:
             items.first.wait_for(state="visible", timeout=5_000)
@@ -357,13 +435,13 @@ class GeminiDriver:
         base = items.filter(has_text=BASE_MODEL_LABEL)
         if base.count() != 1:
             return False
-        base.click()
+        base.click(timeout=5_000)
         try:
             items.first.wait_for(state="hidden", timeout=5_000)
         except Exception:
             return False
 
-        button.click()
+        button.click(timeout=5_000)
         try:
             items.first.wait_for(state="visible", timeout=5_000)
         except Exception:
@@ -371,7 +449,7 @@ class GeminiDriver:
         enhanced = items.filter(has_text=ENHANCED_MODE_LABEL)
         if enhanced.count() != 1:
             return False
-        enhanced.click()
+        enhanced.click(timeout=5_000)
         try:
             items.first.wait_for(state="hidden", timeout=5_000)
         except Exception:

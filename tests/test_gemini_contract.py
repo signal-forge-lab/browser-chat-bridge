@@ -3,8 +3,11 @@ from __future__ import annotations
 import unittest
 
 from browser_chat_bridge.gemini import (
+    BOUND_HISTORY_TIMEOUT_S,
     CDP_CONNECT_TIMEOUT_MS,
+    MODEL_SETUP_TIMEOUT_S,
     GeminiDriver,
+    bound_history_hydrated,
     composer_prompt_matches,
     durable_urls_from_target_rows,
     fixed_model_selected,
@@ -22,6 +25,19 @@ class GeminiContractTests(unittest.TestCase):
         # attach budget above the observed ~15 s edge rather than treating a
         # healthy local browser as TARGET_LOST at the old boundary.
         self.assertGreaterEqual(CDP_CONNECT_TIMEOUT_MS, 30_000)
+
+    def test_model_setup_budget_tolerates_slow_fresh_tab_hydration(self):
+        self.assertGreaterEqual(MODEL_SETUP_TIMEOUT_S, 30.0)
+
+    def test_bound_history_requires_one_complete_hydrated_pair(self):
+        self.assertGreaterEqual(BOUND_HISTORY_TIMEOUT_S, 30.0)
+        self.assertTrue(bound_history_hydrated(1, 1, True, True, True))
+        self.assertTrue(bound_history_hydrated(2, 2, True, True, True))
+        self.assertFalse(bound_history_hydrated(0, 0, False, False, False))
+        self.assertFalse(bound_history_hydrated(1, 0, True, False, False))
+        self.assertFalse(bound_history_hydrated(1, 1, False, True, True))
+        self.assertFalse(bound_history_hydrated(1, 1, True, False, True))
+        self.assertFalse(bound_history_hydrated(1, 1, True, True, False))
 
     def test_conversation_id_comes_from_durable_app_route(self):
         self.assertEqual(
@@ -95,6 +111,24 @@ class GeminiContractTests(unittest.TestCase):
             durable_urls_from_target_rows(rows),
             {"https://gemini.google.com/app/abc123"},
         )
+
+    def test_automation_page_close_is_best_effort(self):
+        class Page:
+            def __init__(self, fail=False):
+                self.closed = 0
+                self.fail = fail
+
+            def close(self):
+                self.closed += 1
+                if self.fail:
+                    raise RuntimeError("simulated close failure")
+
+        page = Page()
+        GeminiDriver._close_page_quietly(page)
+        self.assertEqual(page.closed, 1)
+        failing = Page(fail=True)
+        GeminiDriver._close_page_quietly(failing)
+        self.assertEqual(failing.closed, 1)
 
 
 if __name__ == "__main__":
