@@ -250,6 +250,59 @@ class BridgeServiceTests(unittest.TestCase):
         )
         self.assertIsNone(store.get_run("run-1"))
 
+    def test_cleanup_purges_local_only_run_after_proven_undispatched_status(self):
+        for status in ("NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY"):
+            with self.subTest(status=status):
+                service, store = self.make_service()
+                request_id = f"req-{status.lower()}"
+                service.run_turn(
+                    "run-1",
+                    request_id,
+                    "hello",
+                    lambda _request, current=status: {
+                        "status": current,
+                        "conversation_id": None,
+                        "conversation_url": None,
+                        "content": None,
+                    },
+                )
+                cleanup_calls = []
+
+                result = service.cleanup_run(
+                    "run-1",
+                    lambda request: cleanup_calls.append(request) or {"status": "DELETED"},
+                )
+
+                self.assertEqual(result, {"status": "DELETED", "run_id": "run-1"})
+                self.assertEqual(cleanup_calls, [])
+                self.assertIsNone(store.get_run("run-1"))
+                self.assertIsNone(store.get_turn(request_id))
+
+    def test_cleanup_preserves_unbound_ambiguous_run_for_reconciliation(self):
+        service, store = self.make_service()
+        service.run_turn(
+            "run-1",
+            "req-1",
+            "hello",
+            lambda _request: {
+                "status": "AMBIGUOUS",
+                "conversation_id": None,
+                "conversation_url": None,
+                "content": None,
+            },
+        )
+        cleanup_calls = []
+
+        result = service.cleanup_run(
+            "run-1",
+            lambda request: cleanup_calls.append(request) or {"status": "DELETED"},
+        )
+
+        self.assertEqual(result["status"], "UNRESOLVED")
+        self.assertEqual(cleanup_calls, [])
+        self.assertIsNotNone(store.get_run("run-1"))
+        self.assertIsNotNone(store.get_turn("req-1"))
+
 
 if __name__ == "__main__":
     unittest.main()

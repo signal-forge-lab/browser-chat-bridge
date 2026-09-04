@@ -9,6 +9,9 @@ from .store import BridgeStore
 
 
 DriverCall = Callable[[dict[str, Any]], dict[str, Any]]
+LOCAL_ONLY_CLEANUP_STATUSES = frozenset(
+    {"NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY"}
+)
 
 
 def _prompt_hash(prompt: str) -> str:
@@ -143,7 +146,7 @@ class BridgeService:
                 self._release_capacity()
 
     def cleanup_run(self, run_id: str, driver_call: DriverCall) -> dict[str, Any]:
-        """Delete one bound cloud conversation, then purge its local run cache."""
+        """Delete a bound cloud conversation, or purge a proven local-only run."""
         if not run_id.strip():
             raise ValueError("run_id is required")
 
@@ -155,10 +158,14 @@ class BridgeService:
             if run is None:
                 return {"status": "NOT_FOUND", "run_id": run_id}
             conversation_url = str(run.get("conversation_url") or "")
+            latest_turn = None
             if not conversation_url:
                 latest_turn = self.store.get_latest_turn_for_run(run_id)
                 conversation_url = str((latest_turn or {}).get("conversation_url") or "")
             if not conversation_url:
+                if str((latest_turn or {}).get("status") or "") in LOCAL_ONLY_CLEANUP_STATUSES:
+                    self.store.delete_run(run_id)
+                    return {"status": "DELETED", "run_id": run_id}
                 return {
                     "status": "UNRESOLVED",
                     "run_id": run_id,
