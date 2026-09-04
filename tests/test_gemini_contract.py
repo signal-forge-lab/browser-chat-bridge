@@ -100,6 +100,40 @@ class GeminiContractTests(unittest.TestCase):
         self.assertIsNotNone(selected)
         self.assertEqual(selected.url, "https://gemini.google.com/app#bcb-new")
 
+    def test_reattach_retries_when_first_connection_does_not_enumerate_target(self):
+        class Page:
+            def __init__(self, url):
+                self.url = url
+
+        class Context:
+            def __init__(self, pages):
+                self.pages = pages
+
+        class Browser:
+            def __init__(self, pages):
+                self.contexts = [Context(pages)]
+                self.closed = 0
+
+            def close(self):
+                self.closed += 1
+
+        target_url = "https://gemini.google.com/app#bcb-new"
+        initial = Browser([])
+        first_reattach = Browser([Page("https://gemini.google.com/app")])
+        second_reattach = Browser([Page(target_url)])
+        driver = GeminiDriver("http://127.0.0.1:1")
+        candidates = iter([first_reattach, second_reattach])
+        driver._connect_browser = lambda _playwright: next(candidates)  # type: ignore[method-assign]
+
+        browser, page = driver._reattach_find_page(object(), initial, target_url, timeout_s=1.0)
+
+        self.assertIs(browser, second_reattach)
+        self.assertIsNotNone(page)
+        self.assertEqual(page.url, target_url)
+        self.assertEqual(initial.closed, 1)
+        self.assertEqual(first_reattach.closed, 1)
+        self.assertEqual(second_reattach.closed, 0)
+
     def test_durable_target_rows_extract_only_gemini_conversations(self):
         rows = [
             {"type": "page", "url": "https://gemini.google.com/app/abc123"},

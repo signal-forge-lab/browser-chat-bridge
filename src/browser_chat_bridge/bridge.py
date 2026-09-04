@@ -110,3 +110,43 @@ class BridgeService:
             assert row is not None
             return _turn_payload(row, cached=False)
 
+    def cleanup_run(self, run_id: str, driver_call: DriverCall) -> dict[str, Any]:
+        """Delete one bound cloud conversation, then purge its local run cache."""
+        if not run_id.strip():
+            raise ValueError("run_id is required")
+
+        # The same per-run lock makes cleanup wait for any in-flight turn to
+        # settle before reading its durable conversation binding. This matters
+        # when a caller cancels locally while the independent Driver continues.
+        with self._lock_for(run_id):
+            run = self.store.get_run(run_id)
+            if run is None:
+                return {"status": "NOT_FOUND", "run_id": run_id}
+            conversation_url = str(run.get("conversation_url") or "")
+            if not conversation_url:
+                latest_turn = self.store.get_latest_turn_for_run(run_id)
+                conversation_url = str((latest_turn or {}).get("conversation_url") or "")
+            if not conversation_url:
+                return {
+                    "status": "UNRESOLVED",
+                    "run_id": run_id,
+                    "error": "run has no confirmed durable conversation binding",
+                }
+            try:
+                result = dict(driver_call({"conversation_url": conversation_url}))
+            except Exception as exc:
+                return {
+                    "status": "DELETE_FAILED",
+                    "run_id": run_id,
+                    "error": f"driver cleanup unavailable: {type(exc).__name__}",
+                }
+            status = str(result.get("status") or "DELETE_FAILED")
+            if status in {"DELETED", "NOT_FOUND"}:
+                self.store.delete_run(run_id)
+                return {"status": status, "run_id": run_id}
+            return {
+                "status": status,
+                "run_id": run_id,
+                "error": result.get("error"),
+            }
+

@@ -73,6 +73,15 @@ class BridgeStore:
                 db.execute("SELECT * FROM turns WHERE request_id = ?", (request_id,)).fetchone()
             )
 
+    def get_latest_turn_for_run(self, run_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as db:
+            return self._dict(
+                db.execute(
+                    "SELECT * FROM turns WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (run_id,),
+                ).fetchone()
+            )
+
     def begin_turn(self, run_id: str, request_id: str, prompt_hash: str) -> tuple[dict[str, Any], bool]:
         now = _now()
         with closing(self._connect()) as db:
@@ -145,4 +154,11 @@ class BridgeStore:
                     """,
                     (conversation_id, conversation_url, now, run_id),
                 )
+
+    def delete_run(self, run_id: str) -> None:
+        """Purge one run and its cached turns after remote cleanup is confirmed."""
+        with closing(self._connect()) as db:
+            with db:
+                db.execute("DELETE FROM turns WHERE run_id = ?", (run_id,))
+                db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
 

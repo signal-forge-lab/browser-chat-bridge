@@ -91,6 +91,89 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIsNone(requests[0]["conversation_url"])
         self.assertIsNone(requests[1]["conversation_url"])
 
+    def test_cleanup_deletes_bound_remote_conversation_then_purges_local_run(self):
+        service, store = self.make_service()
+
+        def turn_driver(_request):
+            return {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/app/abc123",
+                "content": "answer",
+            }
+
+        service.run_turn("run-1", "req-1", "hello", turn_driver)
+        cleanup_calls = []
+
+        def cleanup_driver(request):
+            cleanup_calls.append(request)
+            return {"status": "DELETED"}
+
+        result = service.cleanup_run("run-1", cleanup_driver)
+
+        self.assertEqual(result, {"status": "DELETED", "run_id": "run-1"})
+        self.assertEqual(
+            cleanup_calls,
+            [{"conversation_url": "https://gemini.google.com/app/abc123"}],
+        )
+        self.assertIsNone(store.get_run("run-1"))
+        self.assertIsNone(store.get_turn("req-1"))
+
+    def test_cleanup_keeps_mapping_when_driver_cannot_confirm_delete(self):
+        service, store = self.make_service()
+
+        def turn_driver(_request):
+            return {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/app/abc123",
+                "content": "answer",
+            }
+
+        service.run_turn("run-1", "req-1", "hello", turn_driver)
+        result = service.cleanup_run("run-1", lambda _request: {"status": "DELETE_FAILED"})
+
+        self.assertEqual(result["status"], "DELETE_FAILED")
+        self.assertIsNotNone(store.get_run("run-1"))
+        self.assertIsNotNone(store.get_turn("req-1"))
+
+    def test_cleanup_is_idempotent_for_unknown_or_already_purged_run(self):
+        service, _store = self.make_service()
+        calls = []
+
+        result = service.cleanup_run("missing", lambda request: calls.append(request))
+
+        self.assertEqual(result, {"status": "NOT_FOUND", "run_id": "missing"})
+        self.assertEqual(calls, [])
+
+    def test_cleanup_uses_turn_binding_when_noncompleted_result_did_not_bind_run(self):
+        service, store = self.make_service()
+
+        def turn_driver(_request):
+            return {
+                "status": "TIMEOUT",
+                "conversation_id": "slow123",
+                "conversation_url": "https://gemini.google.com/app/slow123",
+                "content": None,
+                "error": "response timed out",
+            }
+
+        service.run_turn("run-1", "req-1", "hello", turn_driver)
+        self.assertIsNone(store.get_run("run-1")["conversation_url"])
+        calls = []
+
+        result = service.cleanup_run(
+            "run-1",
+            lambda request: calls.append(request) or {"status": "DELETED"},
+        )
+
+        self.assertEqual(result["status"], "DELETED")
+        self.assertEqual(
+            calls,
+            [{"conversation_url": "https://gemini.google.com/app/slow123"}],
+        )
+        self.assertIsNone(store.get_run("run-1"))
+
 
 if __name__ == "__main__":
     unittest.main()

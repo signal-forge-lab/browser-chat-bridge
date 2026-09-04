@@ -16,6 +16,7 @@ from .store import BridgeStore
 
 
 RUN_TURN_RE = re.compile(r"^/v1/runs/([^/]+)/turn$")
+RUN_RE = re.compile(r"^/v1/runs/([^/]+)$")
 
 
 def _loopback(host: str) -> bool:
@@ -43,6 +44,27 @@ def _driver_call(driver_url: str, timeout_s: float, request: dict) -> dict:
             raise RuntimeError(f"driver HTTP {exc.code}") from exc
     if not isinstance(value, dict) or not value.get("status"):
         raise RuntimeError("driver returned an invalid result")
+    return value
+
+
+def _driver_cleanup_call(driver_url: str, timeout_s: float, request: dict) -> dict:
+    body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        driver_url.rstrip("/") + "/v1/delete-conversation",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            value = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            raise RuntimeError(f"driver cleanup HTTP {exc.code}") from exc
+    if not isinstance(value, dict) or not value.get("status"):
+        raise RuntimeError("driver returned an invalid cleanup result")
     return value
 
 
@@ -75,6 +97,26 @@ class BridgeHandler(JsonHandler):
             )
         except ValueError as exc:
             self.send_json(409, {"status": "REQUEST_CONFLICT", "error": str(exc)})
+            return
+        self.send_json(200, result)
+
+    def do_DELETE(self) -> None:
+        match = RUN_RE.fullmatch(self.path)
+        if match is None:
+            self.send_json(404, {"error": "not found"})
+            return
+        run_id = match.group(1)
+        try:
+            result = self.service.cleanup_run(
+                run_id,
+                lambda request: _driver_cleanup_call(
+                    self.driver_url,
+                    self.driver_timeout_s,
+                    request,
+                ),
+            )
+        except ValueError as exc:
+            self.send_json(400, {"status": "DELETE_FAILED", "error": str(exc)})
             return
         self.send_json(200, result)
 

@@ -35,6 +35,18 @@ class DriverHandler(JsonHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if self.path == "/v1/delete-conversation":
+            try:
+                request = self.read_json()
+                result = self.driver.delete_conversation(request)
+            except ValueError as exc:
+                self.send_json(400, {"status": "DELETE_FAILED", "error": str(exc)})
+                return
+            except Exception as exc:
+                self.send_json(500, {"status": "DELETE_FAILED", "error": type(exc).__name__})
+                return
+            self.send_json(200, result)
+            return
         if self.path != "/v1/turn":
             self.send_json(404, {"error": "not found"})
             return

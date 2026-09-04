@@ -24,12 +24,17 @@ USER_QUERY_TEXT_SELECTOR = ".query-text p.query-text-line"
 MODEL_RESPONSE_SELECTOR = "model-response"
 MESSAGE_CONTENT_SELECTOR = "message-content .markdown"
 COMPLETE_FOOTER_SELECTOR = ".response-footer.complete"
+CONVERSATION_ACTIONS_SELECTOR = "conversation-actions-icon button"
+DELETE_MENU_ITEM_SELECTOR = 'gem-menu-item[data-test-id="delete-button"]'
+DELETE_DIALOG_SELECTOR = '[role="dialog"]'
+DELETE_CONFIRM_SELECTOR = 'gem-button[cdkfocusinitial] button'
 
 BASE_MODEL_LABEL = "3.8 Flash"
 ENHANCED_MODE_LABEL = "強化版思考モード"
 FIXED_MODEL_PRIMARY = "Flash"
 FIXED_MODEL_SECONDARY = "拡張"
 CDP_CONNECT_TIMEOUT_MS = 30_000
+CDP_CONNECT_ATTEMPTS = 3
 MODEL_SETUP_TIMEOUT_S = 30.0
 BOUND_HISTORY_TIMEOUT_S = 30.0
 
@@ -163,6 +168,22 @@ class GeminiDriver:
         self.promotion_timeout_s = max(15.0, float(promotion_timeout_s))
         self.response_timeout_s = max(10.0, float(response_timeout_s))
 
+    def _connect_browser(self, playwright):
+        """Attach to local CDP with bounded pre-action retries."""
+        last_error = None
+        for attempt in range(CDP_CONNECT_ATTEMPTS):
+            try:
+                return playwright.chromium.connect_over_cdp(
+                    self.cdp_endpoint,
+                    timeout=CDP_CONNECT_TIMEOUT_MS,
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < CDP_CONNECT_ATTEMPTS:
+                    time.sleep(0.5)
+        assert last_error is not None
+        raise last_error
+
     def run_turn(self, request: dict[str, Any]) -> dict[str, Any]:
         from playwright.sync_api import sync_playwright
 
@@ -176,10 +197,7 @@ class GeminiDriver:
         with sync_playwright() as playwright:
             browser = None
             try:
-                browser = playwright.chromium.connect_over_cdp(
-                    self.cdp_endpoint,
-                    timeout=CDP_CONNECT_TIMEOUT_MS,
-                )
+                browser = self._connect_browser(playwright)
             except Exception as exc:
                 return DriverResult("TARGET_LOST", error=f"CDP connect failed: {type(exc).__name__}").as_dict()
             try:
@@ -202,19 +220,16 @@ class GeminiDriver:
                         if not self._create_background_target(browser, target_url):
                             page = None
                         else:
-                            # Playwright does not add targets created through a
-                            # browser-level CDP session to context.pages on the
-                            # same connection. Reattach read-only to discover it.
-                            try:
-                                browser.close()
-                            except Exception:
-                                pass
-                            browser = playwright.chromium.connect_over_cdp(
-                                self.cdp_endpoint,
-                                timeout=CDP_CONNECT_TIMEOUT_MS,
+                            # This Edge profile can omit a newly-created target
+                            # from one Playwright attach even though /json/list
+                            # already exposes it. Retry whole attaches; polling
+                            # context.pages on one connection never discovers
+                            # a target that was absent from that attach.
+                            browser, page = self._reattach_find_page(
+                                playwright,
+                                browser,
+                                target_url,
                             )
-                            if browser.contexts:
-                                page = self._wait_find_page(browser.contexts[0], target_url)
                 if page is None:
                     return DriverResult("TARGET_LOST", error="could not create or resolve Gemini page").as_dict()
                 if requested_url is not None and not self._wait_for_bound_history(page):
@@ -227,12 +242,13 @@ class GeminiDriver:
                     ).as_dict()
                 dispatch = self._dispatch_page_turn(page, prompt)
                 if isinstance(dispatch, DriverResult):
-                    # A fresh marker tab is automation-owned. If dispatch never
-                    # crossed click(), close it so a transient startup/model
-                    # readiness failure cannot accumulate stale /app tabs. All
-                    # post-click uncertainty is classified AMBIGUOUS and must
-                    # remain available for reconciliation instead.
-                    if page_created_here and dispatch.status != "AMBIGUOUS":
+                    # A fresh marker tab is automation-owned and never a
+                    # durable conversation. Close it on every terminal result,
+                    # including AMBIGUOUS: the Bridge never blind-retries that
+                    # request, and leaving marker targets behind can wedge a
+                    # later Playwright CDP attach. Pre-existing Human tabs are
+                    # never closed here.
+                    if page_created_here:
                         self._close_page_quietly(page)
                     return dispatch.as_dict()
 
@@ -250,27 +266,25 @@ class GeminiDriver:
                             "AMBIGUOUS",
                             error="user turn persisted but durable conversation target was not correlated",
                         ).as_dict()
+                    # Do not close the automation-owned page before resolving
+                    # the durable route. Gemini promotes the same browser
+                    # target from /app#bcb-* to /app/<conversation-id> on this
+                    # Edge profile. Closing the marker page here therefore
+                    # closes the promoted conversation itself and makes the
+                    # subsequent attach unable to enumerate it. Disconnecting
+                    # the Playwright client is sufficient; it does not own the
+                    # browser target.
                     try:
-                        browser.close()
-                    except Exception:
-                        pass
-                    try:
-                        browser = playwright.chromium.connect_over_cdp(
-                            self.cdp_endpoint,
-                            timeout=CDP_CONNECT_TIMEOUT_MS,
+                        browser, page = self._reattach_find_page(
+                            playwright,
+                            browser,
+                            promoted_url,
                         )
                     except Exception as exc:
                         return DriverResult(
                             "AMBIGUOUS",
                             error=f"user turn persisted but CDP reattach failed: {type(exc).__name__}",
                         ).as_dict()
-                    if not browser.contexts:
-                        return DriverResult(
-                            "AMBIGUOUS",
-                            error="user turn persisted but reattached browser exposed no context",
-                        ).as_dict()
-                    context = browser.contexts[0]
-                    page = self._wait_find_page(context, promoted_url)
                     if page is None:
                         return DriverResult(
                             "AMBIGUOUS",
@@ -308,6 +322,116 @@ class GeminiDriver:
                 except Exception:
                     pass
 
+    def delete_conversation(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Delete exactly one durable Gemini conversation through its UI."""
+        from playwright.sync_api import sync_playwright
+
+        conversation_url = str(request.get("conversation_url") or "")
+        conversation_id = parse_conversation_id(conversation_url)
+        if conversation_id is None:
+            return DriverResult("DELETE_FAILED", error="invalid durable Gemini conversation URL").as_dict()
+
+        with sync_playwright() as playwright:
+            browser = None
+            page = None
+            page_created_here = False
+            try:
+                try:
+                    browser = self._connect_browser(playwright)
+                except Exception as exc:
+                    return DriverResult("TARGET_LOST", error=f"CDP connect failed: {type(exc).__name__}").as_dict()
+                if not browser.contexts:
+                    return DriverResult("TARGET_LOST", error="CDP browser exposed no context").as_dict()
+                context = browser.contexts[0]
+                page = self._find_page(context, conversation_url)
+                page_created_here = page is None
+                if page is None:
+                    if self.backend_kind == "obscura":
+                        try:
+                            page = context.new_page()
+                            page.goto(conversation_url, wait_until="domcontentloaded", timeout=30_000)
+                        except Exception:
+                            page = None
+                    elif self._create_background_target(browser, conversation_url):
+                        browser, page = self._reattach_find_page(
+                            playwright,
+                            browser,
+                            conversation_url,
+                        )
+                if page is None:
+                    return DriverResult("DELETE_FAILED", error="conversation page could not be resolved").as_dict()
+                if "accounts.google.com" in page.url:
+                    return DriverResult("AUTH_REQUIRED", error="Gemini authentication is required").as_dict()
+
+                actions = page.locator(CONVERSATION_ACTIONS_SELECTOR)
+                try:
+                    actions.wait_for(state="visible", timeout=30_000)
+                except Exception:
+                    if parse_conversation_id(page.url) != conversation_id:
+                        return DriverResult("NOT_FOUND").as_dict()
+                    if self._deleted_conversation_surface(page):
+                        return DriverResult("NOT_FOUND").as_dict()
+                    return DriverResult("DELETE_FAILED", error="conversation actions did not become ready").as_dict()
+                try:
+                    actions.click(timeout=5_000)
+                    delete_item = page.locator(DELETE_MENU_ITEM_SELECTOR)
+                    delete_item.wait_for(state="visible", timeout=5_000)
+                    delete_item.click(timeout=5_000)
+                    dialog = page.locator(DELETE_DIALOG_SELECTOR)
+                    dialog.wait_for(state="visible", timeout=5_000)
+                    confirm = dialog.locator(DELETE_CONFIRM_SELECTOR)
+                    if confirm.count() != 1:
+                        return DriverResult("DELETE_FAILED", error="delete confirmation was not uniquely ready").as_dict()
+                    confirm.click(timeout=5_000)
+                except Exception as exc:
+                    return DriverResult("DELETE_FAILED", error=f"delete UI action failed: {type(exc).__name__}").as_dict()
+
+                deadline = time.monotonic() + 15.0
+                while time.monotonic() < deadline:
+                    try:
+                        if page.is_closed() or parse_conversation_id(page.url) != conversation_id:
+                            return DriverResult("DELETED").as_dict()
+                        if self._deleted_conversation_surface(page):
+                            return DriverResult("DELETED").as_dict()
+                    except Exception:
+                        return DriverResult("DELETED").as_dict()
+                    time.sleep(0.2)
+                # Gemini can keep the deleted conversation URL in the address
+                # bar while clearing its server-side history. Reload the exact
+                # durable URL once and verify it resolves to the empty composer
+                # surface rather than requiring a route change as proof.
+                try:
+                    page.goto(conversation_url, wait_until="domcontentloaded", timeout=30_000)
+                    ready_deadline = time.monotonic() + 10.0
+                    while time.monotonic() < ready_deadline:
+                        if self._deleted_conversation_surface(page):
+                            return DriverResult("DELETED").as_dict()
+                        time.sleep(0.2)
+                except Exception:
+                    pass
+                return DriverResult("DELETE_FAILED", error="Gemini did not confirm conversation removal").as_dict()
+            finally:
+                if page_created_here and page is not None:
+                    self._close_page_quietly(page)
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _deleted_conversation_surface(page) -> bool:
+        """Whether a durable URL now resolves to Gemini's empty-chat surface."""
+        try:
+            composer = page.locator(COMPOSER_SELECTOR)
+            return (
+                composer.count() == 1
+                and composer.is_visible()
+                and page.locator(USER_QUERY_SELECTOR).count() == 0
+                and page.locator(CONVERSATION_ACTIONS_SELECTOR).count() == 0
+            )
+        except Exception:
+            return False
+
     @staticmethod
     def _close_page_quietly(page) -> None:
         try:
@@ -330,14 +454,28 @@ class GeminiDriver:
             return page
         return None
 
-    def _wait_find_page(self, context, url: str):
-        deadline = time.monotonic() + MODEL_SETUP_TIMEOUT_S
+    def _reattach_find_page(self, playwright, browser, url: str, *, timeout_s: float = MODEL_SETUP_TIMEOUT_S):
+        """Reconnect until one attach initially enumerates the exact target.
+
+        In the shared Edge profile, a target created through browser-level CDP
+        can be visible in ``/json/list`` before Playwright includes it in
+        ``context.pages``. The page list on that connection then stays stale,
+        so only a fresh attach can make progress.
+        """
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        current = browser
         while time.monotonic() < deadline:
-            page = self._find_page(context, url)
-            if page is not None:
-                return page
-            time.sleep(0.1)
-        return None
+            try:
+                current.close()
+            except Exception:
+                pass
+            time.sleep(0.25)
+            current = self._connect_browser(playwright)
+            if current.contexts:
+                page = self._find_page(current.contexts[0], url)
+                if page is not None:
+                    return current, page
+        return current, None
 
     @staticmethod
     def _create_background_target(browser, url: str) -> bool:
