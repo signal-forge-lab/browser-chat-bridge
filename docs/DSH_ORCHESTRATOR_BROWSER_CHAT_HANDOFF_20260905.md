@@ -131,9 +131,8 @@ they must not kill arbitrary Edge/Chrome processes.
 
 ### Correct selection
 
-Browser Chat is a DSH `SubagentProvider`, not an LLM model tier.
-
-Select it with:
+Browser Chat is a DSH `SubagentProvider`, not an LLM provider/model. It can be
+selected directly for one workflow task with:
 
 ```text
 subagentType: browser-chat
@@ -151,23 +150,39 @@ await wf.runAgent({
 })
 ```
 
-Use the exact API shape of the current External Workflow/Orchestrator source;
-the invariant is the `subagentType: browser-chat` transport selection.
+Stable Routing can also place the same transport between ordinary model
+candidates. A Browser Chat candidate carries `subagentProvider: browser-chat`;
+the dispatcher then starts that provider without injecting LLM
+`agentOptions.provider/model` values. The central routing policy remains the
+only authority for that ordering.
+
+Current mixed-candidate shape:
+
+```json
+{
+  "provider": "browser-chat",
+  "model": "gemini-3.8-flash-ui",
+  "effort": "high",
+  "privacy": "public-only",
+  "subagentProvider": "browser-chat"
+}
+```
 
 ### Do NOT configure these for Browser Chat
 
-Do not put Browser Chat into a normal LLM route by setting any of these:
+Do not expose Browser Chat as a workflow-authored LLM override by setting any
+of these on the task/request:
 
 ```text
-model: browser-chat
-provider: browser-chat
 model: Gemini 3.8 Flash
 provider/model overrides in agentOptions
-modelHint as a substitute for subagentType
+arbitrary workflow provider/model escape fields
 ```
 
 The Browser Chat provider intentionally rejects injected LLM
-`agentOptions.provider/model` values.
+`agentOptions.provider/model` values. Stable Routing's central
+`subagentProvider` candidate is the supported tier-integration mechanism; it
+does not forward those model-route fields to the Browser Chat provider.
 
 ### Browser-side model ownership
 
@@ -227,41 +242,40 @@ Cancellation is conservative:
 
 ---
 
-## Already-proven acceptance state
+## Current acceptance state
 
-The previous implementation/review completed with the following evidence:
-
-```text
-Browser Chat Bridge unit              20/20 PASS
-DSH Browser Chat provider unit        39/39 PASS
-REAL Loader composition                1/1 PASS
-DSH Browser Chat TypeScript build         PASS
-DSH host build                            PASS
-real Gemini LIVE E2E                  4/4 PASS
-External Workflow -> Browser Chat -> Gemini PASS
-Bridge DB after cleanup               runs=0 / turns=0
-known Browser Chat test titles        MATCHES 0
-```
-
-The External Workflow smoke proved a real path through:
+Current focused evidence after the mixed-routing and capacity work:
 
 ```text
-workflow completed
-  -> one agent spawned
-  -> browser-chat provider
-  -> Bridge
-  -> Driver
-  -> real Gemini reply
-  -> workflow run-end
-  -> process exit 0
-  -> conversation cleanup
+Browser Chat Bridge unit              23/23 PASS
+DSH Browser Chat provider unit        45/45 PASS
+Stable Routing dispatch               58/58 PASS
+Web profile Browser Chat bundle            PASS
+Headless profile Browser Chat bundle       PASS
+Bridge / Driver / AegisChrome CDP health   PASS
+live three-request capacity admission      PASS
+Bridge DB after verification          runs=0 / turns=0
 ```
 
-These are regression gates for the concurrency change.
+The live three-request capacity probe on 2026-09-05 produced:
+
+```text
+request 1 -> admitted -> MODEL_MISMATCH after 35.625 s
+request 2 -> admitted -> MODEL_MISMATCH after 18.231 s
+request 3 -> BUSY before Driver dispatch in 0.105 s
+```
+
+The capacity contract is therefore live-proven: at most two requests are
+admitted and overflow is rejected before browser dispatch. The two admitted
+requests did not complete because the current Gemini UI model menu exposes
+`3.5 Flash-Lite`, `3.6 Flash`, and `3.1 Pro`, but not the Driver-required
+`3.8 Flash + 強化版思考モード`. Keep the fixed model requirement unchanged
+unless the user explicitly authorizes a model change; this is an operational
+model-availability blocker, not a capacity failure.
 
 ---
 
-## New requirement: maximum concurrent Browser Chat executions = 2
+## Shipped requirement: maximum concurrent Browser Chat executions = 2
 
 ### User-visible contract
 
@@ -289,12 +303,10 @@ normally again.
 The authoritative limit should live at the shared Bridge boundary so multiple
 DSH callers/profiles cannot each believe they have their own two slots.
 
-Recommended first implementation:
+Current implementation:
 
 - process-wide non-blocking capacity gate in `BridgeService`;
 - default capacity `2`;
-- optional environment/config override is acceptable, but default must remain
-  `2` for this deployment;
 - acquire before a new side-effecting Driver dispatch;
 - if no permit is available, return typed `BUSY` immediately;
 - release the permit in `finally` when that `run_turn` invocation finishes;
@@ -342,13 +354,13 @@ Recommended typed Bridge reply:
 The exact wording can differ, but it must remain fixed/content-free and contain
 a stable capacity signal.
 
-Prefer not to persist a pre-dispatch `BUSY` as the terminal idempotency result
-for that `request_id`. Capacity rejection has not crossed the side-effecting
-boundary, so the same logical request may be safely attempted later if a caller
-explicitly chooses to do so. The DSH orchestrator itself should fall back rather
-than auto-looping on Browser Chat.
-
-Preserve request-id conflict protection for already-existing rows.
+`BUSY` is persisted as the terminal idempotency result for that exact
+`request_id`, so replay of the same request is deterministic and cannot become
+a later browser send. DSH falls back by starting the next candidate with its
+own identity rather than retrying the rejected Browser Chat turn. On dispose,
+proven pre-dispatch local-only statuses (`NOT_DISPATCHED`, `TARGET_LOST`,
+`AUTH_REQUIRED`, `MODEL_MISMATCH`, `BUSY`) are purged without a Driver delete;
+unbound `AMBIGUOUS` state is retained for reconciliation.
 
 ---
 
@@ -377,21 +389,7 @@ Required properties:
 
 ## DSH orchestrator fallback semantics
 
-### Current dispatcher behavior that matters
-
-The deployed `iw-dsh-workflow-dispatch` currently classifies messages matching
-`capacity`, `overload`, `temporar...`, transport failures, selected HTTP 4xx/5xx,
-etc. as `transient_provider_error`.
-
-That is enough to make the dispatcher choose a fallback candidate, but it also
-feeds the failure into `ModelPolicyResolver.recordFailure()`.
-
-`recordFailure()` opens a candidate circuit, and `transient_provider_error`
-also opens a provider-level circuit. Therefore simply making the diagnostic
-contain `capacity` can over-penalize Browser Chat after a momentary two-slot
-capacity event.
-
-### Required behavior for this integration
+### Shipped behavior
 
 A capacity overflow is not evidence that Browser Chat is unhealthy.
 
@@ -407,7 +405,7 @@ capacity full
   -> later tasks may select Browser Chat again as soon as capacity is free
 ```
 
-Recommended classification name:
+The shipped classification is:
 
 ```text
 capacity_busy
@@ -415,9 +413,12 @@ capacity_busy
 
 or another clearly equivalent typed classification.
 
-Implementation detail is left to the DSH development chat, but the acceptance
-behavior above is mandatory. It is acceptable to implement a dedicated
-capacity branch instead of widening the generic provider-failure regex.
+`capacity_busy` skips the Browser Chat candidate for the current task without
+opening its candidate/provider circuit. Later tasks can select Browser Chat
+again as soon as a Bridge slot is free. Other Browser Chat operational failures
+map to routing-aware classifications such as `auth_unavailable`,
+`model_unavailable`, or `transient_provider_error`; structured-output quality
+failures remain quality failures rather than transport fallbacks.
 
 Do not treat capacity overflow as:
 
@@ -430,24 +431,16 @@ Do not treat capacity overflow as:
 
 ## Orchestrator configuration model
 
-Browser Chat should be represented as a transport/subagent choice, not as a
-model string.
+Browser Chat is represented as a transport-bearing candidate inside the same
+central role chain. It is still not an LLM provider exposed to workflow source.
 
-Conceptual policy:
+Current checked-in policy places Browser Chat after the four free candidates in
+both `balanced` and `deep`, followed by the paid candidates. `fast` remains
+unchanged, but the same candidate shape can be inserted at any central policy
+position when explicitly desired.
 
-```yaml
-candidateChain:
-  - transport: browser-chat
-    subagentType: browser-chat
-  - transport: dsh-model
-    modelHint: balanced
-  - transport: dsh-model
-    modelHint: deep
-```
-
-If the current orchestrator internally represents candidates differently,
-preserve its central routing authority. Do not add arbitrary provider/model
-escape fields to workflow source just for Browser Chat.
+Do not add arbitrary provider/model escape fields to workflow source just for
+Browser Chat.
 
 The important runtime result is:
 

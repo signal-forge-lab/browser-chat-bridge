@@ -14,22 +14,25 @@ Treat the attached handoff as the previous chat's implementation context, but
 prefer current files, Git state, deployed profile state, and live process state
 over any cached statement in the document.
 
-The Browser Chat provider itself is already implemented and live-proven. The
-current intended DSH usage is:
+The Browser Chat provider, Bridge capacity gate, Stable Routing integration,
+and Web/Headless profile deployment are already implemented. Direct task
+selection remains:
 
 ```text
 subagentType: browser-chat
 ```
 
-Browser Chat is NOT a normal DSH model/provider route. Do not configure
-`model: browser-chat`, do not inject `provider/model`, and do not add a workflow
-escape hatch that can override the Driver-fixed Gemini model. The Driver owns:
+Browser Chat is not an LLM provider/model exposed to workflow source. Stable
+Routing may place it between ordinary model candidates using the central
+candidate field `subagentProvider: browser-chat`; the dispatcher must then omit
+LLM `agentOptions.provider/model` injection. Do not add a workflow escape hatch
+that can override the Driver-fixed Gemini model. The Driver owns:
 
 ```text
 Gemini 3.8 Flash + 強化版思考モード
 ```
 
-The main new requirement is:
+The shipped capacity contract is:
 
 ```text
 maximum concurrent Browser Chat executions = 2
@@ -43,7 +46,7 @@ maximum concurrent Browser Chat executions = 2
     -> DSH orchestrator falls back to the next configured candidate
 ```
 
-Implement this end-to-end, including the DSH fallback semantics.
+Verify this end-to-end from the current files before making any further change.
 
 Important design constraints:
 
@@ -62,20 +65,8 @@ Important design constraints:
 9. DSH Browser Chat dispose/cleanup must keep deleting automated Gemini
    conversations.
 
-Before changing DSH fallback logic, inspect the current deployment/source.
-Current observed behavior at handoff:
-
-- `failureEvidence()` treats `capacity`/`overload`-like messages as
-  `transient_provider_error`;
-- normal `recordFailure()` opens candidate circuits;
-- `transient_provider_error` also opens a provider-level circuit.
-
-That default is too broad for a simple two-slot saturation event. A Browser
-Chat capacity BUSY should fall back for the current task without making the
-provider appear unhealthy after capacity clears.
-
-Implement a capacity-specific semantic, for example `capacity_busy`, or an
-equivalent dedicated branch. Required behavior:
+The current dispatcher uses the dedicated `capacity_busy` semantic. Required
+behavior remains:
 
 ```text
 capacity full
@@ -86,10 +77,26 @@ capacity full
   -> later task may use Browser Chat again once a slot is free
 ```
 
-Do not merely add the word `capacity` to a diagnostic and stop there; verify
-the resulting circuit behavior.
+Do not regress this into a generic provider-unhealthy circuit.
 
-Implement tests first or in RED/GREEN order. At minimum prove:
+Current focused baselines are:
+
+```text
+Browser Chat Bridge unit:       23/23 PASS
+DSH provider unit:              45/45 PASS
+Stable Routing dispatch:        58/58 PASS
+Web profile bundle:                  PASS
+Headless profile bundle:             PASS
+Bridge / Driver / CDP health:        PASS
+```
+
+The 2026-09-05 live three-request capacity probe proved two admissions and an
+immediate third-request `BUSY` before Driver dispatch. The two admitted turns
+returned `MODEL_MISMATCH` because the current Gemini UI menu exposed
+`3.5 Flash-Lite`, `3.6 Flash`, and `3.1 Pro`, not the required `3.8 Flash +
+強化版思考モード`. Do not silently downgrade the fixed model.
+
+If changing this area again, preserve or re-prove at minimum:
 
 1. Bridge: two capacity users admitted, third gets immediate BUSY and never
    reaches the fake Driver; after a slot frees a later request is admitted.
@@ -103,24 +110,13 @@ Implement tests first or in RED/GREEN order. At minimum prove:
    TypeScript/host build, live Browser Chat smoke, and External Workflow ->
    browser-chat smoke remain green.
 
-Current reviewed baselines from the handoff are:
+Current implementation commits include Browser Chat Bridge `4ec9222`, Stable
+Routing `a3a9333`, and DSH Browser Chat provider `176f3858cb`. Re-read current
+files and do not assume these hashes remain HEAD.
 
-```text
-browser-chat-bridge commit: 391cd42
-DSH Browser Chat provider commit: 4aa923142b
-
-Browser Chat Bridge unit:       20/20 PASS
-DSH provider unit:              39/39 PASS
-REAL Loader composition:         1/1 PASS
-real Gemini LIVE E2E:            4/4 PASS
-External Workflow integration:      PASS
-```
-
-Re-read current files and do not assume those hashes are still HEAD.
-
-Finish the task end-to-end: implementation, tests, live verification when the
-browser environment is available, deployment/profile update if needed, final
-independent review, repairs, re-review, commit, and clean working-tree check.
+Do not re-implement completed work. Continue only a currently failing or
+explicitly requested acceptance item, then run the narrow relevant verification
+and keep the working tree clean.
 
 Use 100% to mean all requested implementation/review/deployment verification is
 complete. Do not call the task 100% while a required live or fallback acceptance
