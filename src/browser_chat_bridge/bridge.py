@@ -31,10 +31,15 @@ def _turn_payload(row: dict[str, Any], *, cached: bool) -> dict[str, Any]:
 class BridgeService:
     """Run-scoped router. Browser/DOM knowledge stays in the Driver process."""
 
-    def __init__(self, store: BridgeStore):
+    def __init__(self, store: BridgeStore, *, max_in_flight: int = 2):
+        if not isinstance(max_in_flight, int) or isinstance(max_in_flight, bool) or max_in_flight <= 0:
+            raise ValueError("max_in_flight must be a positive integer")
         self.store = store
+        self.max_in_flight = max_in_flight
         self._guard = threading.Lock()
         self._run_locks: dict[str, threading.Lock] = {}
+        self._capacity_guard = threading.Lock()
+        self._in_flight = 0
         # Gemini may promote a new /app send into a separate durable target.
         # Serialize only unbound first turns so that target promotion can be
         # correlated without cross-run ambiguity; bound runs still parallelize.
@@ -43,6 +48,17 @@ class BridgeService:
     def _lock_for(self, run_id: str) -> threading.Lock:
         with self._guard:
             return self._run_locks.setdefault(run_id, threading.Lock())
+
+    def _try_acquire_capacity(self) -> bool:
+        with self._capacity_guard:
+            if self._in_flight >= self.max_in_flight:
+                return False
+            self._in_flight += 1
+            return True
+
+    def _release_capacity(self) -> None:
+        with self._capacity_guard:
+            self._in_flight -= 1
 
     def run_turn(
         self,
@@ -60,55 +76,71 @@ class BridgeService:
                 return _turn_payload(turn, cached=True)
 
             run = self.store.get_run(run_id)
+            if not self._try_acquire_capacity():
+                result = {
+                    "status": "BUSY",
+                    "conversation_id": None if run is None else run.get("conversation_id"),
+                    "conversation_url": None if run is None else run.get("conversation_url"),
+                    "content": None,
+                    "error": f"browser-chat capacity unavailable (max in flight {self.max_in_flight}); not dispatched",
+                }
+                self.store.finish_turn(request_id, result)
+                row = self.store.get_turn(request_id)
+                assert row is not None
+                return _turn_payload(row, cached=False)
+
             request = {
                 "request_id": request_id,
                 "conversation_url": None if run is None else run.get("conversation_url"),
                 "prompt": prompt,
             }
             try:
-                if request["conversation_url"] is None:
-                    with self._new_conversation_lock:
+                try:
+                    if request["conversation_url"] is None:
+                        with self._new_conversation_lock:
+                            result = dict(driver_call(request))
+                    else:
                         result = dict(driver_call(request))
-                else:
-                    result = dict(driver_call(request))
-            except Exception as exc:
-                # The Driver call crossed a side-effecting boundary. A missing
-                # reply cannot prove that the browser did not submit, so never
-                # turn a transport failure into an automatic resend.
-                result = {
-                    "status": "AMBIGUOUS",
-                    "conversation_id": None if run is None else run.get("conversation_id"),
-                    "conversation_url": None if run is None else run.get("conversation_url"),
-                    "content": None,
-                    "error": f"driver result unavailable after dispatch attempt: {type(exc).__name__}",
-                }
-
-            if result.get("status") == "COMPLETED":
-                conversation_id = str(result.get("conversation_id") or "")
-                conversation_url = str(result.get("conversation_url") or "")
-                if not conversation_id or not conversation_url:
+                except Exception as exc:
+                    # The Driver call crossed a side-effecting boundary. A missing
+                    # reply cannot prove that the browser did not submit, so never
+                    # turn a transport failure into an automatic resend.
                     result = {
-                        **result,
                         "status": "AMBIGUOUS",
-                        "error": "completed driver result did not carry a durable conversation binding",
-                    }
-                elif run and run.get("conversation_id") and (
-                    run["conversation_id"] != conversation_id
-                    or run["conversation_url"] != conversation_url
-                ):
-                    result = {
-                        **result,
-                        "status": "CONVERSATION_MISMATCH",
+                        "conversation_id": None if run is None else run.get("conversation_id"),
+                        "conversation_url": None if run is None else run.get("conversation_url"),
                         "content": None,
-                        "error": "driver returned a different conversation for an existing run",
+                        "error": f"driver result unavailable after dispatch attempt: {type(exc).__name__}",
                     }
-                else:
-                    self.store.bind_run(run_id, conversation_id, conversation_url)
 
-            self.store.finish_turn(request_id, result)
-            row = self.store.get_turn(request_id)
-            assert row is not None
-            return _turn_payload(row, cached=False)
+                if result.get("status") == "COMPLETED":
+                    conversation_id = str(result.get("conversation_id") or "")
+                    conversation_url = str(result.get("conversation_url") or "")
+                    if not conversation_id or not conversation_url:
+                        result = {
+                            **result,
+                            "status": "AMBIGUOUS",
+                            "error": "completed driver result did not carry a durable conversation binding",
+                        }
+                    elif run and run.get("conversation_id") and (
+                        run["conversation_id"] != conversation_id
+                        or run["conversation_url"] != conversation_url
+                    ):
+                        result = {
+                            **result,
+                            "status": "CONVERSATION_MISMATCH",
+                            "content": None,
+                            "error": "driver returned a different conversation for an existing run",
+                        }
+                    else:
+                        self.store.bind_run(run_id, conversation_id, conversation_url)
+
+                self.store.finish_turn(request_id, result)
+                row = self.store.get_turn(request_id)
+                assert row is not None
+                return _turn_payload(row, cached=False)
+            finally:
+                self._release_capacity()
 
     def cleanup_run(self, run_id: str, driver_call: DriverCall) -> dict[str, Any]:
         """Delete one bound cloud conversation, then purge its local run cache."""

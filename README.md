@@ -28,6 +28,10 @@ The first turn creates a new Gemini conversation; later turns with a new
 `request_id` under the same `run-1` reuse exactly that conversation. A different
 run starts a different conversation.
 
+The Bridge admits at most two newly created turns at once. A third concurrent
+turn returns `BUSY` before Driver dispatch; the `request_id` caches that result,
+so callers can fall back without risking a late duplicate browser send.
+
 The fixed UI mode is Gemini 3.8 Flash with `強化版思考モード` enabled.
 
 `CHAT_DRIVER_BACKEND=obscura` uses the same Driver contract. Current shadow

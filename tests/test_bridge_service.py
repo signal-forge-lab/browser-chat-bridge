@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -90,6 +91,81 @@ class BridgeServiceTests(unittest.TestCase):
 
         self.assertIsNone(requests[0]["conversation_url"])
         self.assertIsNone(requests[1]["conversation_url"])
+
+    def test_global_capacity_admits_two_turns_and_returns_busy_for_third(self):
+        service, _store = self.make_service()
+
+        def bind(run_id):
+            service.run_turn(
+                run_id,
+                f"{run_id}-bind",
+                "bind",
+                lambda _request: {
+                    "status": "COMPLETED",
+                    "conversation_id": run_id,
+                    "conversation_url": f"https://gemini.google.com/app/{run_id}",
+                    "content": "bound",
+                },
+            )
+
+        for run_id in ("run-a", "run-b", "run-c"):
+            bind(run_id)
+
+        entered = threading.Barrier(3)
+        release = threading.Event()
+
+        def blocking_driver(_request):
+            entered.wait(timeout=2)
+            release.wait(timeout=2)
+            return {
+                "status": "COMPLETED",
+                "conversation_id": "unused",
+                "conversation_url": "https://gemini.google.com/app/unused",
+                "content": "done",
+            }
+
+        results = {}
+
+        def run_blocked(run_id):
+            results[run_id] = service.run_turn(
+                run_id,
+                f"{run_id}-busy",
+                "hold",
+                blocking_driver,
+            )
+
+        first = threading.Thread(target=run_blocked, args=("run-a",))
+        second = threading.Thread(target=run_blocked, args=("run-b",))
+        first.start()
+        second.start()
+        try:
+            entered.wait(timeout=2)
+
+            third_calls = []
+            third = service.run_turn(
+                "run-c",
+                "run-c-busy",
+                "third",
+                lambda request: third_calls.append(request),
+            )
+            replay = service.run_turn(
+                "run-c",
+                "run-c-busy",
+                "third",
+                lambda request: third_calls.append(request),
+            )
+
+            self.assertEqual(third["status"], "BUSY")
+            self.assertFalse(third["cached"])
+            self.assertEqual(replay["status"], "BUSY")
+            self.assertTrue(replay["cached"])
+            self.assertEqual(third_calls, [])
+        finally:
+            release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
 
     def test_cleanup_deletes_bound_remote_conversation_then_purges_local_run(self):
         service, store = self.make_service()
