@@ -3,16 +3,26 @@ from __future__ import annotations
 import unittest
 
 from browser_chat_bridge.gemini import (
+    CDP_CONNECT_TIMEOUT_MS,
     GeminiDriver,
+    composer_prompt_matches,
     durable_urls_from_target_rows,
     fixed_model_selected,
     normalize_text,
     parse_conversation_id,
     prompt_matches,
+    query_prompt_matches,
 )
 
 
 class GeminiContractTests(unittest.TestCase):
+    def test_cdp_attach_budget_tolerates_slow_local_browser_handshake(self):
+        # The authenticated desktop browser can take materially longer than a
+        # loopback HTTP probe to finish Playwright's full CDP attach. Keep the
+        # attach budget above the observed ~15 s edge rather than treating a
+        # healthy local browser as TARGET_LOST at the old boundary.
+        self.assertGreaterEqual(CDP_CONNECT_TIMEOUT_MS, 30_000)
+
     def test_conversation_id_comes_from_durable_app_route(self):
         self.assertEqual(
             parse_conversation_id("https://gemini.google.com/app/491c5405bb57437c"),
@@ -30,6 +40,33 @@ class GeminiContractTests(unittest.TestCase):
         self.assertTrue(prompt_matches("hello\r\nworld", "hello\nworld"))
         self.assertFalse(prompt_matches("hello  world", "hello world"))
         self.assertEqual(normalize_text("  a\r\nb  "), "a\nb")
+
+    def test_composer_confirmation_reconstructs_contenteditable_paragraphs(self):
+        # Gemini's rich-textarea renders one intentional blank line as
+        # <p>line 1</p><p><br></p><p>line 2</p>. Playwright inner_text()
+        # expands that DOM to five linefeeds, so composer admission must
+        # reconstruct the paragraph semantics instead of comparing innerText.
+        self.assertTrue(
+            composer_prompt_matches(
+                ["line 1", "\n", "line 2"],
+                "line 1\n\nline 2",
+            )
+        )
+        self.assertTrue(composer_prompt_matches(["line 1", "", "line 2"], "line 1\n\nline 2"))
+        self.assertTrue(composer_prompt_matches(["line 1", "line 2"], "line 1\nline 2"))
+        self.assertFalse(composer_prompt_matches(["line 1", "\n", "line 2"], "line 1\nline 2"))
+        self.assertFalse(composer_prompt_matches(["line 1", "line X"], "line 1\nline 2"))
+
+    def test_user_turn_confirmation_reconstructs_all_query_lines_strictly(self):
+        # Gemini persists the same multi-paragraph prompt as multiple
+        # p.query-text-line nodes; the blank logical line is exposed as one
+        # layout newline. All lines must be reconstructed in order rather than
+        # requiring exactly one p node.
+        actual = ["Reply with exactly BCB_EW_OK and nothing else.", "\n", "Keep the final answer within approximately 8192 tokens."]
+        expected = "Reply with exactly BCB_EW_OK and nothing else.\n\nKeep the final answer within approximately 8192 tokens."
+        self.assertTrue(query_prompt_matches(actual, expected))
+        self.assertFalse(query_prompt_matches(actual, expected.replace("8192", "4096")))
+        self.assertFalse(query_prompt_matches([actual[0], actual[2]], expected))
 
     def test_new_chat_marker_selects_only_the_exact_background_target(self):
         class Page:

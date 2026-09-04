@@ -29,6 +29,7 @@ BASE_MODEL_LABEL = "3.8 Flash"
 ENHANCED_MODE_LABEL = "強化版思考モード"
 FIXED_MODEL_PRIMARY = "Flash"
 FIXED_MODEL_SECONDARY = "拡張"
+CDP_CONNECT_TIMEOUT_MS = 30_000
 
 
 def normalize_text(value: str) -> str:
@@ -37,6 +38,40 @@ def normalize_text(value: str) -> str:
 
 def prompt_matches(actual: str, expected: str) -> bool:
     return normalize_text(actual) == normalize_text(expected)
+
+
+def composer_prompt_matches(paragraph_texts: list[str], expected: str) -> bool:
+    """Compare Gemini rich-textarea paragraphs to the exact outbound prompt.
+
+    Gemini represents each logical line as a ``<p>`` and an intentional blank
+    line as an empty ``<p><br></p>``. Playwright ``inner_text()`` inserts extra
+    layout linefeeds between those paragraphs, so it is not a faithful
+    pre-dispatch read-back for multi-paragraph prompts. Reconstructing the
+    logical text from the direct paragraph children preserves every requested
+    blank line while keeping ordinary prompt confirmation strict.
+    """
+    logical_paragraphs: list[str] = []
+    for text in paragraph_texts:
+        paragraph = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+        # Chromium exposes <p><br></p> as one layout newline through
+        # all_inner_texts(). Semantically that node is the empty logical line
+        # between the surrounding paragraphs.
+        if paragraph == "\n":
+            paragraph = ""
+        logical_paragraphs.append(paragraph)
+    actual = "\n".join(logical_paragraphs)
+    return prompt_matches(actual, expected)
+
+
+def query_prompt_matches(line_texts: list[str], expected: str) -> bool:
+    """Compare persisted Gemini query-line nodes to the exact sent prompt.
+
+    ``user-query`` uses the same paragraph semantics as the composer for a
+    multi-line submission. Reuse the logical reconstruction so the
+    post-click confirmation stays byte-meaningful across paragraph boundaries
+    instead of weakening to substring/whitespace matching.
+    """
+    return composer_prompt_matches(line_texts, expected)
 
 
 def fixed_model_selected(button_text: str) -> bool:
@@ -116,7 +151,10 @@ class GeminiDriver:
         with sync_playwright() as playwright:
             browser = None
             try:
-                browser = playwright.chromium.connect_over_cdp(self.cdp_endpoint, timeout=15_000)
+                browser = playwright.chromium.connect_over_cdp(
+                    self.cdp_endpoint,
+                    timeout=CDP_CONNECT_TIMEOUT_MS,
+                )
             except Exception as exc:
                 return DriverResult("TARGET_LOST", error=f"CDP connect failed: {type(exc).__name__}").as_dict()
             try:
@@ -146,7 +184,8 @@ class GeminiDriver:
                             except Exception:
                                 pass
                             browser = playwright.chromium.connect_over_cdp(
-                                self.cdp_endpoint, timeout=15_000
+                                self.cdp_endpoint,
+                                timeout=CDP_CONNECT_TIMEOUT_MS,
                             )
                             if browser.contexts:
                                 page = self._wait_find_page(browser.contexts[0], target_url)
@@ -186,7 +225,8 @@ class GeminiDriver:
                         pass
                     try:
                         browser = playwright.chromium.connect_over_cdp(
-                            self.cdp_endpoint, timeout=15_000
+                            self.cdp_endpoint,
+                            timeout=CDP_CONNECT_TIMEOUT_MS,
                         )
                     except Exception as exc:
                         return DriverResult(
@@ -389,7 +429,7 @@ class GeminiDriver:
             if users.count() < 1:
                 return False
             visible = users.last.locator(USER_QUERY_TEXT_SELECTOR)
-            return visible.count() == 1 and prompt_matches(visible.inner_text(), prompt)
+            return visible.count() > 0 and query_prompt_matches(visible.all_inner_texts(), prompt)
         except Exception:
             return False
 
@@ -428,7 +468,13 @@ class GeminiDriver:
         composer = page.locator(COMPOSER_SELECTOR)
         try:
             composer.fill(prompt)
-            if not prompt_matches(composer.inner_text(), prompt):
+            paragraphs = composer.locator(":scope > p")
+            composer_matches = (
+                composer_prompt_matches(paragraphs.all_inner_texts(), prompt)
+                if paragraphs.count() > 0
+                else prompt_matches(composer.inner_text(), prompt)
+            )
+            if not composer_matches:
                 return DriverResult("NOT_DISPATCHED", error="composer read-back mismatch")
             send = page.locator(SEND_BUTTON_SELECTOR)
             if send.count() != 1 or not send.is_visible():
@@ -449,7 +495,7 @@ class GeminiDriver:
                     return DriverResult("AMBIGUOUS", error="more than one new user turn appeared")
                 if user_count == baseline_users + 1:
                     latest = page.locator(USER_QUERY_SELECTOR).last.locator(USER_QUERY_TEXT_SELECTOR)
-                    if latest.count() == 1 and prompt_matches(latest.inner_text(), prompt):
+                    if latest.count() > 0 and query_prompt_matches(latest.all_inner_texts(), prompt):
                         confirmed = True
                         break
             except Exception:
