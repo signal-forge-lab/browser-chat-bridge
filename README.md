@@ -46,4 +46,7 @@ integration end-to-end, including live verification and independent review, use:
   constraints, acceptance matrix, and review/completion gates.
 - `docs/DSH_ORCHESTRATOR_PROMPT_20260904.md` — copyable top-level execution
   prompt with the recommended parallel lanes and model-depth assignments.
+- `docs/DSH_BROWSER_CHAT_PROVIDER_PLAN_20260904.md` — frozen implementation
+  contract and plan for the DSH `browser-chat` subagent provider, with the
+  staged change set and apply procedure.
 
