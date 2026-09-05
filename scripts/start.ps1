@@ -1,4 +1,6 @@
-# Start Browser Chat's nodriver-owned Edge, Driver, and Bridge as background processes.
+# Start Browser Chat's lightweight control plane as background processes.
+# Microsoft Edge is intentionally lazy-started by Browser Host only when the
+# Bridge admits a real browser-chat turn.
 param(
     [string]$BrowserPort = '8764',
     [string]$BridgePort = '8765',
@@ -95,7 +97,14 @@ $env:PYTHONPATH = Join-Path $Repo 'src'
 $env:CHAT_BROWSER_PROFILE = $BrowserProfile
 
 $BrowserHealth = Get-Health "http://127.0.0.1:$BrowserPort/health"
-if (-not $BrowserHealth) {
+$BrowserUp = $null -ne $BrowserHealth
+if ($BrowserUp -and $BrowserHealth.lazy_start -ne $true) {
+    Write-Output 'browser-chat: upgrading recorded Browser Host to lazy-start runtime.'
+    Stop-RecordedServer -Name 'browser'
+    $BrowserUp = $false
+    $BrowserHealth = $null
+}
+if (-not $BrowserUp) {
     $BrowserPidFile = Join-Path $Runtime 'browser.pid'
     if ((Test-Path $BrowserPidFile) -and (Test-PidAlive -Id ([int](Get-Content $BrowserPidFile)))) {
         Write-Output 'browser-chat: browser host is alive but unhealthy; restarting recorded browser host only.'
@@ -104,36 +113,35 @@ if (-not $BrowserHealth) {
     $ExistingCdp = Find-BrowserChatEdgeCdpEndpoint
     if ($ExistingCdp) {
         $env:CHAT_BROWSER_ATTACH_ENDPOINT = $ExistingCdp
-        Write-Output "browser-chat: nodriver will reattach Browser Chat Edge at $ExistingCdp."
+        Write-Output "browser-chat: Browser Host will reattach Browser Chat Edge at $ExistingCdp on the next browser-chat turn."
     } else {
         Remove-Item Env:CHAT_BROWSER_ATTACH_ENDPOINT -ErrorAction SilentlyContinue
-        Write-Output "browser-chat: nodriver will launch Microsoft Edge with profile $BrowserProfile."
+        Write-Output "browser-chat: Browser Host is idle; Edge will launch on the next browser-chat turn."
     }
     Start-Server -Name 'browser' -Module 'browser_chat_bridge.browser_server' -Port $BrowserPort
     $BrowserHealth = Get-Health "http://127.0.0.1:$BrowserPort/health"
 }
-if (-not $BrowserHealth -or -not $BrowserHealth.cdp_endpoint) {
-    throw 'browser-chat: nodriver Edge did not expose a CDP endpoint'
-}
-$CdpEndpoint = [string]$BrowserHealth.cdp_endpoint
 
-$BridgeUp = Test-Health "http://127.0.0.1:$BridgePort/health"
+$BridgeHealth = Get-Health "http://127.0.0.1:$BridgePort/health"
+$BridgeUp = $null -ne $BridgeHealth
+if ($BridgeUp -and $BridgeHealth.lazy_browser -ne $true) {
+    Write-Output 'browser-chat: upgrading recorded Bridge to lazy-browser runtime.'
+    Stop-RecordedServer -Name 'bridge'
+    $BridgeUp = $false
+}
 $DriverHealth = Get-Health "http://127.0.0.1:$DriverPort/health"
 $DriverUp = $null -ne $DriverHealth
-if ($DriverUp -and $DriverHealth.cdp_endpoint) {
-    $BoundCdp = ([string]$DriverHealth.cdp_endpoint).TrimEnd('/')
-    $WantedCdp = $CdpEndpoint.TrimEnd('/')
-    if ($BoundCdp -ne $WantedCdp) {
-        Write-Output "browser-chat: Driver CDP changed ($BoundCdp -> $WantedCdp); restarting recorded Driver only."
-        Stop-RecordedServer -Name 'driver'
-        $DriverUp = $false
-    }
+if ($DriverUp -and $DriverHealth.runtime_rebind -ne $true) {
+    Write-Output 'browser-chat: upgrading recorded Driver to runtime-rebind support.'
+    Stop-RecordedServer -Name 'driver'
+    $DriverUp = $false
 }
 
 $env:CHAT_DRIVER_BACKEND = 'chromium'
-$env:CHAT_DRIVER_CDP_ENDPOINT = $CdpEndpoint
+Remove-Item Env:CHAT_DRIVER_CDP_ENDPOINT -ErrorAction SilentlyContinue
+$env:CHAT_BRIDGE_BROWSER_URL = "http://127.0.0.1:$BrowserPort"
 $env:CHAT_BRIDGE_DRIVER_URL = "http://127.0.0.1:$DriverPort"
 
 if (-not $DriverUp) { Start-Server -Name 'driver' -Module 'browser_chat_bridge.driver_server' -Port $DriverPort }
 if (-not $BridgeUp) { Start-Server -Name 'bridge' -Module 'browser_chat_bridge.bridge_server' -Port $BridgePort }
-Write-Output "browser-chat: Edge/nodriver ready at $CdpEndpoint."
+Write-Output 'browser-chat: control plane ready; Edge/nodriver will start only when browser-chat is actually dispatched.'

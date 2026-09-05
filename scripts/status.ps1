@@ -30,17 +30,21 @@ $BrowserBody = Show-Health 'browser 8764' 'http://127.0.0.1:8764/health'
 $DriverBody = Show-Health 'driver 8766' 'http://127.0.0.1:8766/health'
 Show-Health 'bridge 8765' 'http://127.0.0.1:8765/health' | Out-Null
 
-$Cdp = if ($BrowserBody -and $BrowserBody.cdp_endpoint) {
+if ($BrowserBody -and $BrowserBody.lazy_start -eq $true -and $BrowserBody.ready -ne $true) {
+    Write-Output 'edge : idle (lazy start; will launch on the next admitted browser-chat turn)'
+}
+
+$Cdp = if ($BrowserBody -and $BrowserBody.ready -eq $true -and $BrowserBody.cdp_endpoint) {
     [string]$BrowserBody.cdp_endpoint
-} elseif ($DriverBody -and $DriverBody.cdp_endpoint) {
+} elseif ($DriverBody -and $DriverBody.ready -eq $true -and $DriverBody.cdp_endpoint) {
     [string]$DriverBody.cdp_endpoint
 } else {
     ''
 }
 if ($Cdp) { Show-Health 'cdp' "$Cdp/json/version" | Out-Null }
-if ($BrowserBody -and $DriverBody -and $BrowserBody.cdp_endpoint -and $DriverBody.cdp_endpoint) {
+if ($BrowserBody -and $DriverBody -and $BrowserBody.ready -eq $true -and $DriverBody.ready -eq $true -and $BrowserBody.cdp_endpoint -and $DriverBody.cdp_endpoint) {
     if (([string]$BrowserBody.cdp_endpoint).TrimEnd('/') -ne ([string]$DriverBody.cdp_endpoint).TrimEnd('/')) {
-        Write-Output "driver cdp : STALE (run scripts/start.ps1 to rebind)"
+        Write-Output 'driver cdp : STALE (the next admitted browser-chat turn will rebind it)'
     }
 }
 Show-Pid 'browser'

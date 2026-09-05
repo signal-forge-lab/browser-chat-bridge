@@ -9,6 +9,7 @@ from .store import BridgeStore
 
 
 DriverCall = Callable[[dict[str, Any]], dict[str, Any]]
+PreDispatchCall = Callable[[], None]
 LOCAL_ONLY_CLEANUP_STATUSES = frozenset(
     {"NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY"}
 )
@@ -69,6 +70,8 @@ class BridgeService:
         request_id: str,
         prompt: str,
         driver_call: DriverCall,
+        *,
+        before_dispatch: PreDispatchCall | None = None,
     ) -> dict[str, Any]:
         if not run_id.strip() or not request_id.strip() or not prompt.strip():
             raise ValueError("run_id, request_id, and prompt are required")
@@ -92,12 +95,28 @@ class BridgeService:
                 assert row is not None
                 return _turn_payload(row, cached=False)
 
-            request = {
-                "request_id": request_id,
-                "conversation_url": None if run is None else run.get("conversation_url"),
-                "prompt": prompt,
-            }
             try:
+                if before_dispatch is not None:
+                    try:
+                        before_dispatch()
+                    except Exception as exc:
+                        result = {
+                            "status": "NOT_DISPATCHED",
+                            "conversation_id": None if run is None else run.get("conversation_id"),
+                            "conversation_url": None if run is None else run.get("conversation_url"),
+                            "content": None,
+                            "error": f"browser runtime unavailable before dispatch: {type(exc).__name__}",
+                        }
+                        self.store.finish_turn(request_id, result)
+                        row = self.store.get_turn(request_id)
+                        assert row is not None
+                        return _turn_payload(row, cached=False)
+
+                request = {
+                    "request_id": request_id,
+                    "conversation_url": None if run is None else run.get("conversation_url"),
+                    "prompt": prompt,
+                }
                 try:
                     if request["conversation_url"] is None:
                         with self._new_conversation_lock:

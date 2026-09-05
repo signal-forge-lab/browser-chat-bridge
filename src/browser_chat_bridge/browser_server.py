@@ -5,7 +5,7 @@ import os
 import threading
 from http.server import ThreadingHTTPServer
 
-from .browser_host import NodriverManagedEdge, default_profile_dir
+from .browser_host import BrowserHostError, NodriverManagedEdge, default_profile_dir
 from .http_json import JsonHandler
 
 
@@ -21,14 +21,16 @@ class BrowserHandler(JsonHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            healthy = self.managed.healthy
+            ready = self.managed.healthy
             self.send_json(
-                200 if healthy else 503,
+                200,
                 {
-                    "ok": healthy,
+                    "ok": True,
+                    "ready": ready,
+                    "lazy_start": True,
                     "backend": "nodriver",
                     "browser": "edge",
-                    "cdp_endpoint": self.managed.endpoint,
+                    "cdp_endpoint": self.managed.endpoint if ready else None,
                     "profile_dir": str(self.managed.profile_dir),
                     "attached_existing": self.managed.attached_existing,
                 },
@@ -37,6 +39,23 @@ class BrowserHandler(JsonHandler):
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        if self.path == "/ensure":
+            try:
+                self.read_json()
+                endpoint = self.managed.ensure()
+            except (ValueError, BrowserHostError) as exc:
+                self.send_json(503, {"ok": False, "error": str(exc)})
+                return
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "ready": True,
+                    "cdp_endpoint": endpoint,
+                    "started_on_demand": True,
+                },
+            )
+            return
         if self.path != "/shutdown":
             self.send_json(404, {"error": "not found"})
             return
@@ -54,7 +73,6 @@ def main() -> None:
         browser_executable=os.environ.get("CHAT_BROWSER_EDGE_EXECUTABLE"),
         attach_endpoint=os.environ.get("CHAT_BROWSER_ATTACH_ENDPOINT"),
     )
-    managed.start()
     BrowserHandler.managed = managed
     server = ThreadingHTTPServer((host, port), BrowserHandler)
     try:

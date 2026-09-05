@@ -110,11 +110,14 @@ DSH Orchestrator / External Workflow
   -> https://gemini.google.com/
 ```
 
-The Browser Chat launcher owns a dedicated persistent Microsoft Edge profile via
-nodriver and passes nodriver's random CDP endpoint to the existing Driver. The
-profile is `%LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data`,
-separate from Converlay and normal Edge. Always inspect browser health instead
-of hard-coding a CDP port.
+Browser Host owns a dedicated persistent Microsoft Edge profile via nodriver.
+The control plane (Browser Host / Driver / Bridge) can remain resident with no
+Edge process. After Bridge admits a real browser-chat turn, it calls Browser
+Host `/ensure`; the host single-flights concurrent ensures, starts or reattaches
+the dedicated Edge, and returns nodriver's random CDP endpoint. Bridge then
+calls Driver `/v1/rebind` before any prompt dispatch. The profile is
+`%LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data`, separate from
+Converlay and normal Edge. Never hard-code the dynamic CDP port.
 
 Current health commands live in:
 
@@ -124,9 +127,13 @@ scripts/status.ps1
 scripts/stop.ps1
 ```
 
-The scripts manage their recorded browser-host/Driver/Bridge processes plus the
-dedicated BrowserChatEdge profile only; they must not kill normal Edge,
-Converlay, or legacy AegisChrome processes.
+`start.ps1` starts only the lightweight control plane; it intentionally leaves
+the dedicated Edge closed until browser-chat is selected. If the user closes
+Edge later, no immediate relaunch occurs: the next admitted browser-chat turn
+performs the lazy restart and Driver rebind. The scripts manage their recorded
+browser-host/Driver/Bridge processes plus the dedicated BrowserChatEdge profile
+only; they must not kill normal Edge, Converlay, or legacy AegisChrome
+processes.
 
 ---
 
@@ -250,13 +257,15 @@ Cancellation is conservative:
 Current focused evidence after the mixed-routing and capacity work:
 
 ```text
-Browser Chat Bridge unit              26/26 PASS
+Browser Chat Bridge unit              34/34 PASS
 DSH Browser Chat provider unit        45/45 PASS
-Stable Routing dispatch               58/58 PASS
+Stable Routing dispatch               59/59 PASS
 Web profile Browser Chat bundle            PASS
 Headless profile Browser Chat bundle       PASS
 Edge/nodriver / Driver / Bridge health     PASS
 nodriver safe reattach                     PASS
+lazy Edge cold-start on admitted turn      PASS
+lazy Edge restart after manual close       PASS
 live three-request capacity admission      PASS
 Bridge DB after verification          runs=0 / turns=0
 ```

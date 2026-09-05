@@ -57,6 +57,36 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertTrue(second["cached"])
         self.assertEqual(len(calls), 1)
 
+    def test_predispatch_failure_is_not_dispatched_and_is_cached(self):
+        service, _store = self.make_service()
+        preflight_calls = []
+        driver_calls = []
+
+        def preflight():
+            preflight_calls.append(1)
+            raise RuntimeError("browser unavailable")
+
+        first = service.run_turn(
+            "run-1",
+            "req-1",
+            "hello",
+            lambda request: driver_calls.append(request),
+            before_dispatch=preflight,
+        )
+        second = service.run_turn(
+            "run-1",
+            "req-1",
+            "hello",
+            lambda request: driver_calls.append(request),
+            before_dispatch=preflight,
+        )
+
+        self.assertEqual(first["status"], "NOT_DISPATCHED")
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertEqual(preflight_calls, [1])
+        self.assertEqual(driver_calls, [])
+
     def test_same_request_id_with_different_prompt_is_rejected(self):
         service, _store = self.make_service()
 
@@ -142,11 +172,13 @@ class BridgeServiceTests(unittest.TestCase):
             entered.wait(timeout=2)
 
             third_calls = []
+            third_preflight = []
             third = service.run_turn(
                 "run-c",
                 "run-c-busy",
                 "third",
                 lambda request: third_calls.append(request),
+                before_dispatch=lambda: third_preflight.append(1),
             )
             replay = service.run_turn(
                 "run-c",
@@ -160,6 +192,7 @@ class BridgeServiceTests(unittest.TestCase):
             self.assertEqual(replay["status"], "BUSY")
             self.assertTrue(replay["cached"])
             self.assertEqual(third_calls, [])
+            self.assertEqual(third_preflight, [])
         finally:
             release.set()
             first.join(timeout=2)

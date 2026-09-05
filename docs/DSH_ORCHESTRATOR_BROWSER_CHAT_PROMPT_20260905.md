@@ -82,21 +82,26 @@ Do not regress this into a generic provider-unhealthy circuit.
 Current focused baselines are:
 
 ```text
-Browser Chat Bridge unit:       26/26 PASS
+Browser Chat Bridge unit:       34/34 PASS
 DSH provider unit:              45/45 PASS
-Stable Routing dispatch:        58/58 PASS
+Stable Routing dispatch:        59/59 PASS
 Web profile bundle:                  PASS
 Headless profile bundle:             PASS
 Edge/nodriver / Driver / CDP health: PASS
 nodriver safe reattach:              PASS
+lazy Edge cold-start:                PASS
+lazy Edge restart after close:       PASS
 ```
 
 The 2026-09-05 live three-request capacity probe proved two admissions and an
 immediate third-request `BUSY` before Driver dispatch. The Driver now selects
 the middle Flash family by `Flash` present + `Lite` absent rather than by a
 numeric version string, and requires `拡張` before dispatch. The dedicated
-BrowserChatEdge profile is launched by nodriver and is isolated from Converlay
-and normal Edge. It must be signed into the same entitled Google account as the
+BrowserChatEdge is isolated from Converlay and normal Edge and is now lazy-
+started by nodriver only after Bridge admits a browser-chat turn. Bridge calls
+Browser Host `/ensure`, then Driver `/v1/rebind`, before prompt dispatch. Closing
+the dedicated Edge therefore leaves it closed until the next actual Browser Chat
+use. The profile must be signed into the same entitled Google account as the
 user's regular Gemini UI. If it lacks `強化版思考モード`, treat that as a
 browser-profile/account entitlement mismatch, not as a routing/capacity defect;
 do not silently downgrade the fixed model.

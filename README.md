@@ -49,8 +49,10 @@ See `docs/DESIGN.md` and `docs/GEMINI_DOM_CONTRACT_20260904.md`.
 ## Operations
 
 On Windows, Browser Chat owns a dedicated persistent Microsoft Edge profile via
-`nodriver`; the existing Driver then attaches to nodriver's dynamic local CDP
-endpoint. The profile is isolated from Converlay and normal Edge:
+`nodriver`. Browser Host, Driver, and Bridge stay lightweight and resident, but
+Edge itself is lazy-started only after the Bridge admits a real browser-chat
+turn. The Driver is then rebound to nodriver's dynamic local CDP endpoint. The
+profile is isolated from Converlay and normal Edge:
 
 ```text
 %LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data
@@ -64,12 +66,16 @@ powershell -ExecutionPolicy Bypass -File scripts/status.ps1
 powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
 ```
 
-`start.ps1` starts/reuses only the Browser Chat dedicated Edge profile. If a
-surviving BrowserChatEdge process already exposes CDP after a host restart,
-nodriver reattaches to that exact endpoint instead of starting a second browser
-on the same profile. `stop.ps1` closes only the dedicated BrowserChatEdge
-processes; it does not touch Converlay, normal Edge, or the legacy AegisChrome
-profile.
+`start.ps1` starts the Browser Host / Driver / Bridge control plane but does not
+open Edge. On the first admitted browser-chat turn, Bridge calls Browser Host
+`POST /ensure`; Browser Host single-flights concurrent callers and starts (or
+reattaches) the dedicated Edge, then Bridge asks Driver `POST /v1/rebind` to use
+the returned CDP endpoint before any prompt is sent. If the user later closes
+Edge, it stays closed until the next admitted browser-chat turn, which launches
+it again. A third concurrent turn still receives `BUSY` before this lazy-start
+preflight. `stop.ps1` closes only Browser Chat's recorded services and dedicated
+BrowserChatEdge processes; it does not touch Converlay, normal Edge, or the
+legacy AegisChrome profile.
 
 ## DSH integration handoff
 

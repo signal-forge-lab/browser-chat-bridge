@@ -100,6 +100,7 @@ class NodriverManagedEdge:
         self._start_fn = start_fn
         self._ready = threading.Event()
         self._stop = threading.Event()
+        self._ensure_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._endpoint = ""
         self._error: BaseException | None = None
@@ -115,6 +116,22 @@ class NodriverManagedEdge:
     @property
     def healthy(self) -> bool:
         return bool(self._endpoint) and self._error is None and endpoint_alive(self._endpoint)
+
+    def ensure(self, timeout_s: float = 20.0) -> str:
+        """Return a live CDP endpoint, starting/restarting Edge only on demand."""
+        with self._ensure_lock:
+            if self.healthy:
+                return self._endpoint
+
+            if self._thread is not None:
+                self.stop()
+
+            if self.attach_endpoint and not endpoint_alive(self.attach_endpoint):
+                # A Safe-Restart attach target can disappear while the host
+                # survives. Do not loop forever trying the stale endpoint.
+                self.attach_endpoint = ""
+
+            return self.start(timeout_s)
 
     def start(self, timeout_s: float = 20.0) -> str:
         if self._thread is not None:
@@ -145,6 +162,7 @@ class NodriverManagedEdge:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=10.0)
         self._thread = None
+        self._endpoint = ""
 
     def _thread_main(self) -> None:
         try:

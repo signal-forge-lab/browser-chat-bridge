@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -86,3 +87,73 @@ class BrowserHostTests(unittest.TestCase):
             managed.stop()
             self.assertTrue(fake.closed)
             self.assertFalse(fake.stopped)
+
+    def test_ensure_starts_edge_only_on_demand_and_reuses_healthy_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeBrowser()
+            calls = []
+
+            async def start_fn(**kwargs):
+                calls.append(kwargs)
+                return fake
+
+            managed = NodriverManagedEdge(
+                profile_dir=Path(tmp) / "profile",
+                browser_executable=__file__,
+                start_fn=start_fn,
+            )
+            self.assertEqual(managed.endpoint, "")
+            self.assertEqual(calls, [])
+            with patch("browser_chat_bridge.browser_host.endpoint_alive", return_value=True):
+                self.assertEqual(managed.ensure(), "http://127.0.0.1:45678")
+                self.assertEqual(managed.ensure(), "http://127.0.0.1:45678")
+            self.assertEqual(len(calls), 1)
+            managed.stop()
+
+    def test_ensure_is_single_flight_for_concurrent_callers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = FakeBrowser()
+            calls = []
+
+            async def start_fn(**kwargs):
+                calls.append(kwargs)
+                return fake
+
+            managed = NodriverManagedEdge(
+                profile_dir=Path(tmp) / "profile",
+                browser_executable=__file__,
+                start_fn=start_fn,
+            )
+            results = []
+            with patch("browser_chat_bridge.browser_host.endpoint_alive", return_value=True):
+                threads = [threading.Thread(target=lambda: results.append(managed.ensure())) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=2)
+            self.assertEqual(results, ["http://127.0.0.1:45678"] * 2)
+            self.assertEqual(len(calls), 1)
+            managed.stop()
+
+    def test_ensure_restarts_after_cdp_loss_instead_of_returning_stale_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = FakeBrowser()
+            second = FakeBrowser()
+            browsers = iter((first, second))
+            calls = []
+
+            async def start_fn(**kwargs):
+                calls.append(kwargs)
+                return next(browsers)
+
+            managed = NodriverManagedEdge(
+                profile_dir=Path(tmp) / "profile",
+                browser_executable=__file__,
+                start_fn=start_fn,
+            )
+            with patch("browser_chat_bridge.browser_host.endpoint_alive", return_value=False):
+                self.assertEqual(managed.ensure(), "http://127.0.0.1:45678")
+                self.assertEqual(managed.ensure(), "http://127.0.0.1:45678")
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(first.stopped)
+            managed.stop()
