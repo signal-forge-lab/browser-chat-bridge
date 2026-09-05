@@ -96,6 +96,11 @@ $env:CHAT_BROWSER_PROFILE = $BrowserProfile
 
 $BrowserHealth = Get-Health "http://127.0.0.1:$BrowserPort/health"
 if (-not $BrowserHealth) {
+    $BrowserPidFile = Join-Path $Runtime 'browser.pid'
+    if ((Test-Path $BrowserPidFile) -and (Test-PidAlive -Id ([int](Get-Content $BrowserPidFile)))) {
+        Write-Output 'browser-chat: browser host is alive but unhealthy; restarting recorded browser host only.'
+        Stop-RecordedServer -Name 'browser'
+    }
     $ExistingCdp = Find-BrowserChatEdgeCdpEndpoint
     if ($ExistingCdp) {
         $env:CHAT_BROWSER_ATTACH_ENDPOINT = $ExistingCdp

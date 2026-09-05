@@ -21,10 +21,11 @@ class BrowserHandler(JsonHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
+            healthy = self.managed.healthy
             self.send_json(
-                200,
+                200 if healthy else 503,
                 {
-                    "ok": True,
+                    "ok": healthy,
                     "backend": "nodriver",
                     "browser": "edge",
                     "cdp_endpoint": self.managed.endpoint,

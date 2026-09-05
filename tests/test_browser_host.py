@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from browser_chat_bridge.browser_host import NodriverManagedEdge
+from browser_chat_bridge.browser_host import NodriverManagedEdge, endpoint_alive
 
 
 class FakeConfig:
@@ -30,6 +31,19 @@ class FakeBrowser:
 
 
 class BrowserHostTests(unittest.TestCase):
+    def test_endpoint_alive_reports_cdp_loss(self):
+        response = type("Response", (), {"__enter__": lambda self: self, "__exit__": lambda self, *args: False, "status": 200})()
+        with patch("browser_chat_bridge.browser_host.urlopen", return_value=response):
+            self.assertTrue(endpoint_alive("http://127.0.0.1:45678"))
+        with patch("browser_chat_bridge.browser_host.urlopen", side_effect=OSError("down")):
+            self.assertFalse(endpoint_alive("http://127.0.0.1:45678"))
+
+    def test_endpoint_alive_rejects_non_loopback_endpoint(self):
+        with patch("browser_chat_bridge.browser_host.urlopen") as opener:
+            self.assertFalse(endpoint_alive("http://192.0.2.1:9222"))
+            opener.assert_not_called()
+
+
     def test_nodriver_edge_exposes_dynamic_cdp_endpoint_and_stops(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

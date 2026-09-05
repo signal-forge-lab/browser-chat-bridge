@@ -2,16 +2,40 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import importlib
+import ipaddress
+import inspect
 import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, cast
 from urllib.parse import urlparse
+from urllib.request import urlopen
 
 
 class BrowserHostError(RuntimeError):
     pass
+
+
+def endpoint_alive(endpoint: str, timeout_s: float = 1.0) -> bool:
+    parsed = urlparse(str(endpoint or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or not parsed.port:
+        return False
+    try:
+        if not ipaddress.ip_address(parsed.hostname).is_loopback:
+            return False
+    except ValueError:
+        if parsed.hostname != "localhost":
+            return False
+    try:
+        with urlopen(
+            f"{endpoint.rstrip('/')}/json/version",
+            timeout=max(0.1, float(timeout_s)),
+        ) as response:
+            return int(getattr(response, "status", 0)) == 200
+    except Exception:
+        return False
 
 
 def resolve_edge_executable(explicit: str | None = None) -> str:
@@ -88,6 +112,10 @@ class NodriverManagedEdge:
     def attached_existing(self) -> bool:
         return bool(self.attach_endpoint)
 
+    @property
+    def healthy(self) -> bool:
+        return bool(self._endpoint) and self._error is None and endpoint_alive(self._endpoint)
+
     def start(self, timeout_s: float = 20.0) -> str:
         if self._thread is not None:
             return self._endpoint
@@ -131,8 +159,8 @@ class NodriverManagedEdge:
         attached_existing = self.attached_existing
         if start_fn is None:
             try:
-                import nodriver as uc
-            except ImportError as exc:
+                uc = importlib.import_module("nodriver")
+            except ModuleNotFoundError as exc:
                 raise BrowserHostError(
                     "Browser Chat Edge requires nodriver; install the project dependencies"
                 ) from exc
@@ -167,14 +195,18 @@ class NodriverManagedEdge:
                 close = getattr(browser, "aclose", None)
                 if callable(close):
                     try:
-                        await close()
+                        close_result = close()
+                        if inspect.isawaitable(close_result):
+                            await cast(Awaitable[Any], close_result)
                     except Exception:
                         pass
             else:
                 clean_exit = False
                 if cdp_close is not None:
                     try:
-                        await browser.send(cdp_close())
+                        close_result = browser.send(cdp_close())
+                        if inspect.isawaitable(close_result):
+                            await cast(Awaitable[Any], close_result)
                     except Exception:
                         pass
                     process = getattr(browser, "_process", None)
