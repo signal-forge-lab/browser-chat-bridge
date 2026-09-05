@@ -74,9 +74,10 @@ connections, so no run-global browser mutex is required.
 ## Fixed model
 
 Every turn verifies the Gemini picker before touching the composer. The required
-state is Gemini 3.8 Flash with `強化版思考モード`; the current UI renders the
-selected pill as `Flash / 拡張`. If the fixed state cannot be proven or repaired,
-the Driver returns `MODEL_MISMATCH` and sends nothing.
+state is Gemini 3.8 Flash with `強化版思考モード`; the Driver identifies the
+middle Flash family as `Flash` present with `Lite` absent, then requires the
+selected pill summary to include `拡張`. If the fixed state cannot be proven or
+repaired, the Driver returns `MODEL_MISMATCH` and sends nothing.
 
 ## Dispatch safety
 

@@ -10,6 +10,7 @@ from browser_chat_bridge.gemini import (
     bound_history_hydrated,
     composer_prompt_matches,
     durable_urls_from_target_rows,
+    flash_model_item,
     fixed_model_selected,
     normalize_text,
     parse_conversation_id,
@@ -47,10 +48,19 @@ class GeminiContractTests(unittest.TestCase):
         self.assertIsNone(parse_conversation_id("https://gemini.google.com/app"))
         self.assertIsNone(parse_conversation_id("https://example.com/app/abc"))
 
-    def test_fixed_model_requires_flash_expansion(self):
+    def test_fixed_model_requires_flash_without_lite_plus_expansion(self):
         self.assertTrue(fixed_model_selected("Flash\n拡張"))
+        self.assertTrue(fixed_model_selected("Flash 拡張"))
         self.assertFalse(fixed_model_selected("Flash"))
         self.assertFalse(fixed_model_selected("3.5 Flash-Lite"))
+        self.assertFalse(fixed_model_selected("Flash-Lite 拡張"))
+        self.assertFalse(fixed_model_selected("Pro 拡張"))
+
+    def test_flash_model_item_uses_flash_without_lite_not_version_number(self):
+        self.assertTrue(flash_model_item("3.8 Flash\nあらゆる場面でサポート"))
+        self.assertTrue(flash_model_item("3.6 Flash\nあらゆる場面でサポート"))
+        self.assertFalse(flash_model_item("3.5 Flash-Lite\nすばやく回答を得るのに最適"))
+        self.assertFalse(flash_model_item("3.1 Pro\n高度な推論"))
 
     def test_prompt_confirmation_normalizes_only_line_endings_and_outer_space(self):
         self.assertTrue(prompt_matches("hello\r\nworld", "hello\nworld"))

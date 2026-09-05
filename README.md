@@ -32,12 +32,17 @@ The Bridge admits at most two newly created turns at once. A third concurrent
 turn returns `BUSY` before Driver dispatch; the `request_id` caches that result,
 so callers can fall back without risking a late duplicate browser send.
 
-The fixed UI mode is Gemini 3.8 Flash with `強化版思考モード` enabled.
+The fixed UI mode is Gemini 3.8 Flash with `強化版思考モード` enabled. The
+Driver identifies the current middle Flash option by UI family (`Flash`
+present, `Lite` absent) and requires the compact button summary to also carry
+`拡張`; this avoids depending on the version number rendered by a particular
+Gemini Web rollout while still rejecting Flash-Lite and Pro.
 
 `CHAT_DRIVER_BACKEND=obscura` uses the same Driver contract. Current shadow
 verification shows that Obscura can hydrate the Gemini SPA/composer, but an
-unauthenticated Obscura profile does not expose the required 3.8 Flash enhanced
-mode, so production remains on Chromium. See `docs/OBSCURA_SHADOW_20260904.md`.
+unauthenticated Obscura profile does not expose the required non-Lite Flash +
+enhanced mode, so production remains on Chromium. See
+`docs/OBSCURA_SHADOW_20260904.md`.
 
 See `docs/DESIGN.md` and `docs/GEMINI_DOM_CONTRACT_20260904.md`.
 

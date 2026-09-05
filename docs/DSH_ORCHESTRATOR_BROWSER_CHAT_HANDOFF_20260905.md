@@ -247,7 +247,7 @@ Cancellation is conservative:
 Current focused evidence after the mixed-routing and capacity work:
 
 ```text
-Browser Chat Bridge unit              23/23 PASS
+Browser Chat Bridge unit              24/24 PASS
 DSH Browser Chat provider unit        45/45 PASS
 Stable Routing dispatch               58/58 PASS
 Web profile Browser Chat bundle            PASS
@@ -266,12 +266,19 @@ request 3 -> BUSY before Driver dispatch in 0.105 s
 ```
 
 The capacity contract is therefore live-proven: at most two requests are
-admitted and overflow is rejected before browser dispatch. The two admitted
-requests did not complete because the current Gemini UI model menu exposes
-`3.5 Flash-Lite`, `3.6 Flash`, and `3.1 Pro`, but not the Driver-required
-`3.8 Flash + 強化版思考モード`. Keep the fixed model requirement unchanged
-unless the user explicitly authorizes a model change; this is an operational
-model-availability blocker, not a capacity failure.
+admitted and overflow is rejected before browser dispatch. The Driver now
+identifies the required middle Flash family as `Flash` present + `Lite` absent,
+then additionally requires `拡張` (強化版思考モード) before dispatch. Do not
+depend on the numeric version label rendered by a particular Gemini Web
+rollout.
+
+The current Browser Chat-dedicated AegisChrome profile is nevertheless an
+operational blocker for LIVE completion: its Gemini UI shows the upgrade CTA,
+offers the middle Flash family but does not expose 強化版思考モード at all.
+The user's regular Gemini UI does expose 3.8 Flash + 強化版思考モード. Therefore
+the remaining requirement is to bind the dedicated CDP browser to the same
+entitled Google account/profile; this is a browser-profile/account mismatch,
+not an orchestrator routing or capacity defect.
 
 ---
 

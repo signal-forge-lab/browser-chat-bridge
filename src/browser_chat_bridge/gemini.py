@@ -29,7 +29,6 @@ DELETE_MENU_ITEM_SELECTOR = 'gem-menu-item[data-test-id="delete-button"]'
 DELETE_DIALOG_SELECTOR = '[role="dialog"]'
 DELETE_CONFIRM_SELECTOR = 'gem-button[cdkfocusinitial] button'
 
-BASE_MODEL_LABEL = "3.8 Flash"
 ENHANCED_MODE_LABEL = "強化版思考モード"
 FIXED_MODEL_PRIMARY = "Flash"
 FIXED_MODEL_SECONDARY = "拡張"
@@ -105,8 +104,17 @@ def bound_history_hydrated(
 
 
 def fixed_model_selected(button_text: str) -> bool:
-    lines = {line.strip() for line in normalize_text(button_text).split("\n") if line.strip()}
-    return FIXED_MODEL_PRIMARY in lines and FIXED_MODEL_SECONDARY in lines
+    summary = " ".join(normalize_text(button_text).split()).casefold()
+    return (
+        FIXED_MODEL_PRIMARY.casefold() in summary
+        and "lite" not in summary
+        and FIXED_MODEL_SECONDARY in summary
+    )
+
+
+def flash_model_item(item_text: str) -> bool:
+    summary = " ".join(normalize_text(item_text).split()).casefold()
+    return FIXED_MODEL_PRIMARY.casefold() in summary and "lite" not in summary
 
 
 def parse_conversation_id(url: str) -> str | None:
@@ -570,14 +578,32 @@ class GeminiDriver:
             items.first.wait_for(state="visible", timeout=5_000)
         except Exception:
             return False
-        base = items.filter(has_text=BASE_MODEL_LABEL)
-        if base.count() != 1:
+        base_indexes = [
+            index
+            for index, text in enumerate(items.all_inner_texts())
+            if flash_model_item(text)
+        ]
+        if len(base_indexes) != 1:
             return False
+        base = items.nth(base_indexes[0])
         base.click(timeout=5_000)
         try:
             items.first.wait_for(state="hidden", timeout=5_000)
         except Exception:
             return False
+
+        # Selecting the non-Lite Flash option preserves the independent
+        # enhanced-mode toggle.
+        # If it was already enabled, the summary becomes "Flash 拡張" and we
+        # must not click the toggle again (which would turn it off).
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            try:
+                if fixed_model_selected(button.inner_text()):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.1)
 
         button.click(timeout=5_000)
         try:
