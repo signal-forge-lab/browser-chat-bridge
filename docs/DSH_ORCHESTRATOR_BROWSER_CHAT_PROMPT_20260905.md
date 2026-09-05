@@ -82,21 +82,22 @@ Do not regress this into a generic provider-unhealthy circuit.
 Current focused baselines are:
 
 ```text
-Browser Chat Bridge unit:       24/24 PASS
+Browser Chat Bridge unit:       26/26 PASS
 DSH provider unit:              45/45 PASS
 Stable Routing dispatch:        58/58 PASS
 Web profile bundle:                  PASS
 Headless profile bundle:             PASS
-Bridge / Driver / CDP health:        PASS
+Edge/nodriver / Driver / CDP health: PASS
+nodriver safe reattach:              PASS
 ```
 
 The 2026-09-05 live three-request capacity probe proved two admissions and an
 immediate third-request `BUSY` before Driver dispatch. The Driver now selects
 the middle Flash family by `Flash` present + `Lite` absent rather than by a
 numeric version string, and requires `拡張` before dispatch. The dedicated
-AegisChrome profile currently exposes the Flash family but not
-`強化版思考モード` and shows the Google AI Plus upgrade CTA, while the user's
-regular Gemini UI does expose 3.8 Flash + 強化版思考モード. Treat that as a
+BrowserChatEdge profile is launched by nodriver and is isolated from Converlay
+and normal Edge. It must be signed into the same entitled Google account as the
+user's regular Gemini UI. If it lacks `強化版思考モード`, treat that as a
 browser-profile/account entitlement mismatch, not as a routing/capacity defect;
 do not silently downgrade the fixed model.
 

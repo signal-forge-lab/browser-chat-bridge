@@ -48,8 +48,15 @@ See `docs/DESIGN.md` and `docs/GEMINI_DOM_CONTRACT_20260904.md`.
 
 ## Operations
 
-On Windows, the production Bridge and Driver can be managed independently of
-the user-owned authenticated Chromium process:
+On Windows, Browser Chat owns a dedicated persistent Microsoft Edge profile via
+`nodriver`; the existing Driver then attaches to nodriver's dynamic local CDP
+endpoint. The profile is isolated from Converlay and normal Edge:
+
+```text
+%LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data
+```
+
+Manage the nodriver Edge host, Driver, and Bridge together with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/start.ps1
@@ -57,12 +64,12 @@ powershell -ExecutionPolicy Bypass -File scripts/status.ps1
 powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
 ```
 
-`start.ps1` never launches, focuses, refreshes, or closes Chromium. An explicit
-`-CdpEndpoint` or `CHAT_DRIVER_CDP_ENDPOINT` remains authoritative; otherwise
-the script detects the current AegisChrome `--remote-debugging-port` so an
-AegisChrome restart that changes the port does not leave the Driver bound to a
-stale endpoint. If no AegisChrome endpoint can be detected, the historical
-`127.0.0.1:51881` fallback is used.
+`start.ps1` starts/reuses only the Browser Chat dedicated Edge profile. If a
+surviving BrowserChatEdge process already exposes CDP after a host restart,
+nodriver reattaches to that exact endpoint instead of starting a second browser
+on the same profile. `stop.ps1` closes only the dedicated BrowserChatEdge
+processes; it does not touch Converlay, normal Edge, or the legacy AegisChrome
+profile.
 
 ## DSH integration handoff
 

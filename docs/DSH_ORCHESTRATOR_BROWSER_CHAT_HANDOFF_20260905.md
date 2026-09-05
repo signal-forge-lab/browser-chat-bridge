@@ -105,14 +105,16 @@ DSH Orchestrator / External Workflow
   -> SubagentProvider: browser-chat
   -> Browser Chat Bridge  http://127.0.0.1:8765
   -> Browser Chat Driver  http://127.0.0.1:8766
-  -> AegisChrome CDP      dynamic local port
+  -> Browser Chat Edge host http://127.0.0.1:8764
+  -> nodriver-owned Edge CDP dynamic local port
   -> https://gemini.google.com/
 ```
 
-The Browser Chat launcher/status scripts detect the current AegisChrome CDP
-port. At the final verification of the previous task it was `9339`, but the port
-is operational state, not a configuration constant. Always inspect current
-health instead of hard-coding that number.
+The Browser Chat launcher owns a dedicated persistent Microsoft Edge profile via
+nodriver and passes nodriver's random CDP endpoint to the existing Driver. The
+profile is `%LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data`,
+separate from Converlay and normal Edge. Always inspect browser health instead
+of hard-coding a CDP port.
 
 Current health commands live in:
 
@@ -122,8 +124,9 @@ scripts/status.ps1
 scripts/stop.ps1
 ```
 
-The scripts only manage Bridge/Driver processes that they recorded themselves;
-they must not kill arbitrary Edge/Chrome processes.
+The scripts manage their recorded browser-host/Driver/Bridge processes plus the
+dedicated BrowserChatEdge profile only; they must not kill normal Edge,
+Converlay, or legacy AegisChrome processes.
 
 ---
 
@@ -247,12 +250,13 @@ Cancellation is conservative:
 Current focused evidence after the mixed-routing and capacity work:
 
 ```text
-Browser Chat Bridge unit              24/24 PASS
+Browser Chat Bridge unit              26/26 PASS
 DSH Browser Chat provider unit        45/45 PASS
 Stable Routing dispatch               58/58 PASS
 Web profile Browser Chat bundle            PASS
 Headless profile Browser Chat bundle       PASS
-Bridge / Driver / AegisChrome CDP health   PASS
+Edge/nodriver / Driver / Bridge health     PASS
+nodriver safe reattach                     PASS
 live three-request capacity admission      PASS
 Bridge DB after verification          runs=0 / turns=0
 ```
@@ -272,13 +276,12 @@ then additionally requires `拡張` (強化版思考モード) before dispatch. 
 depend on the numeric version label rendered by a particular Gemini Web
 rollout.
 
-The current Browser Chat-dedicated AegisChrome profile is nevertheless an
-operational blocker for LIVE completion: its Gemini UI shows the upgrade CTA,
-offers the middle Flash family but does not expose 強化版思考モード at all.
-The user's regular Gemini UI does expose 3.8 Flash + 強化版思考モード. Therefore
-the remaining requirement is to bind the dedicated CDP browser to the same
-entitled Google account/profile; this is a browser-profile/account mismatch,
-not an orchestrator routing or capacity defect.
+The Browser Chat runtime now launches a dedicated Edge profile through nodriver.
+That profile still needs to be signed into the same entitled Google account as
+the user's regular Gemini UI before the final LIVE success gate can pass. If the
+dedicated profile shows the upgrade CTA or lacks 強化版思考モード, treat that as
+a browser-profile/account entitlement mismatch, not an orchestrator routing or
+capacity defect.
 
 ---
 

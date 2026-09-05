@@ -7,11 +7,12 @@ name = "browser-chat-bridge"
 version = "0.1.0"
 description = "Run-scoped bridge from local callers to browser-hosted chat UIs"
 requires-python = ">=3.12"
-dependencies = ["playwright>=1.55"]
+dependencies = ["playwright>=1.55", "nodriver>=0.50.3,<0.51"]
 
 [project.scripts]
 browser-chat-bridge = "browser_chat_bridge.bridge_server:main"
 browser-chat-driver = "browser_chat_bridge.driver_server:main"
+browser-chat-browser = "browser_chat_bridge.browser_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,10 +1,6 @@
-# Start the Browser Chat Bridge and Driver as separate background processes.
-# Idempotent: refuses to double-start when both are already healthy.
-# PID files and logs live under the ignored .runtime/ directory.
-# The authenticated Chromium (with --remote-debugging-port) is user-owned and
-# is NEVER started, focused, or closed by this script.
+# Start Browser Chat's nodriver-owned Edge, Driver, and Bridge as background processes.
 param(
-    [string]$CdpEndpoint = '',
+    [string]$BrowserPort = '8764',
     [string]$BridgePort = '8765',
     [string]$DriverPort = '8766'
 )
@@ -12,34 +8,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $Repo = Split-Path -Parent $PSScriptRoot
 $Runtime = Join-Path $Repo '.runtime'
+$BrowserProfile = if ($env:CHAT_BROWSER_PROFILE) {
+    $env:CHAT_BROWSER_PROFILE
+} else {
+    Join-Path $env:LOCALAPPDATA 'Intelligence Works\BrowserChatEdge\User Data'
+}
 New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
-
-function Find-AegisChromeCdpEndpoint {
-    try {
-        $Candidates = Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine -match 'AegisChrome[\\/]User Data' -and
-            $_.CommandLine -match '--remote-debugging-port=(\d+)'
-        }
-        foreach ($Candidate in $Candidates) {
-            if ($Candidate.CommandLine -match '--remote-debugging-port=(\d+)') {
-                return "http://127.0.0.1:$($Matches[1])"
-            }
-        }
-    } catch {
-        # Detection is best-effort. The explicit/env/default paths below remain authoritative.
-    }
-    return $null
-}
-
-if (-not $CdpEndpoint) {
-    $CdpEndpoint = if ($env:CHAT_DRIVER_CDP_ENDPOINT) {
-        $env:CHAT_DRIVER_CDP_ENDPOINT
-    } else {
-        $DetectedCdp = Find-AegisChromeCdpEndpoint
-        if ($DetectedCdp) { $DetectedCdp } else { 'http://127.0.0.1:51881' }
-    }
-}
 
 function Test-Health([string]$Url) {
     try { Invoke-RestMethod -Uri $Url -TimeoutSec 3 -ErrorAction Stop | Out-Null; return $true }
@@ -54,6 +28,24 @@ function Get-Health([string]$Url) {
 function Test-PidAlive([int]$Id) {
     try { Get-Process -Id $Id -ErrorAction Stop | Out-Null; return $true }
     catch { return $false }
+}
+
+function Find-BrowserChatEdgeCdpEndpoint {
+    try {
+        $Candidates = Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'BrowserChatEdge[\\/]User Data' -and
+            $_.CommandLine -match '--remote-debugging-port=(\d+)'
+        }
+        foreach ($Candidate in $Candidates) {
+            if ($Candidate.CommandLine -match '--remote-debugging-port=(\d+)') {
+                $Endpoint = "http://127.0.0.1:$($Matches[1])"
+                if (Test-Health "$Endpoint/json/version") { return $Endpoint }
+            }
+        }
+    } catch {
+    }
+    return $null
 }
 
 function Stop-RecordedServer([string]$Name) {
@@ -84,7 +76,7 @@ function Start-Server([string]$Name, [string]$Module, [string]$Port) {
         -RedirectStandardOutput $Out -RedirectStandardError $Err
     Set-Content -Path $PidFile -Value $Proc.Id
     $Url = "http://127.0.0.1:$Port/health"
-    for ($i = 0; $i -lt 30; $i++) {
+    for ($i = 0; $i -lt 40; $i++) {
         if (Test-Health $Url) {
             Write-Output "browser-chat: $Name healthy on $Url (pid $($Proc.Id))."
             return
@@ -99,14 +91,30 @@ function Start-Server([string]$Name, [string]$Module, [string]$Port) {
     exit 1
 }
 
+$env:PYTHONPATH = Join-Path $Repo 'src'
+$env:CHAT_BROWSER_PROFILE = $BrowserProfile
+
+$BrowserHealth = Get-Health "http://127.0.0.1:$BrowserPort/health"
+if (-not $BrowserHealth) {
+    $ExistingCdp = Find-BrowserChatEdgeCdpEndpoint
+    if ($ExistingCdp) {
+        $env:CHAT_BROWSER_ATTACH_ENDPOINT = $ExistingCdp
+        Write-Output "browser-chat: nodriver will reattach Browser Chat Edge at $ExistingCdp."
+    } else {
+        Remove-Item Env:CHAT_BROWSER_ATTACH_ENDPOINT -ErrorAction SilentlyContinue
+        Write-Output "browser-chat: nodriver will launch Microsoft Edge with profile $BrowserProfile."
+    }
+    Start-Server -Name 'browser' -Module 'browser_chat_bridge.browser_server' -Port $BrowserPort
+    $BrowserHealth = Get-Health "http://127.0.0.1:$BrowserPort/health"
+}
+if (-not $BrowserHealth -or -not $BrowserHealth.cdp_endpoint) {
+    throw 'browser-chat: nodriver Edge did not expose a CDP endpoint'
+}
+$CdpEndpoint = [string]$BrowserHealth.cdp_endpoint
+
 $BridgeUp = Test-Health "http://127.0.0.1:$BridgePort/health"
 $DriverHealth = Get-Health "http://127.0.0.1:$DriverPort/health"
 $DriverUp = $null -ne $DriverHealth
-
-# AegisChrome may come back on a different random CDP port. A healthy Driver
-# can therefore be alive but permanently attached to yesterday's endpoint.
-# Rebind only a Driver this launcher owns; never kill an arbitrary process that
-# happens to answer on the Driver port.
 if ($DriverUp -and $DriverHealth.cdp_endpoint) {
     $BoundCdp = ([string]$DriverHealth.cdp_endpoint).TrimEnd('/')
     $WantedCdp = $CdpEndpoint.TrimEnd('/')
@@ -116,17 +124,11 @@ if ($DriverUp -and $DriverHealth.cdp_endpoint) {
         $DriverUp = $false
     }
 }
-if ($BridgeUp -and $DriverUp) {
-    Write-Output 'browser-chat: Bridge and Driver already healthy; nothing to start.'
-    exit 0
-}
 
-# Child processes inherit these from this PowerShell session.
-$env:PYTHONPATH = Join-Path $Repo 'src'
 $env:CHAT_DRIVER_BACKEND = 'chromium'
 $env:CHAT_DRIVER_CDP_ENDPOINT = $CdpEndpoint
 $env:CHAT_BRIDGE_DRIVER_URL = "http://127.0.0.1:$DriverPort"
 
 if (-not $DriverUp) { Start-Server -Name 'driver' -Module 'browser_chat_bridge.driver_server' -Port $DriverPort }
 if (-not $BridgeUp) { Start-Server -Name 'bridge' -Module 'browser_chat_bridge.bridge_server' -Port $BridgePort }
-Write-Output "browser-chat: CDP endpoint expected at $CdpEndpoint (bring up Chromium yourself; this script never touches your browser)."
+Write-Output "browser-chat: Edge/nodriver ready at $CdpEndpoint."
