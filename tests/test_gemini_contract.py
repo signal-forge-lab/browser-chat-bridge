@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from browser_chat_bridge.gemini import (
     BOUND_HISTORY_TIMEOUT_S,
@@ -29,6 +30,24 @@ class GeminiContractTests(unittest.TestCase):
 
     def test_model_setup_budget_tolerates_slow_fresh_tab_hydration(self):
         self.assertGreaterEqual(MODEL_SETUP_TIMEOUT_S, 30.0)
+
+    def test_fixed_model_setup_uses_the_declared_fresh_tab_budget(self):
+        class Keyboard:
+            def press(self, _key):
+                return None
+
+        class Page:
+            keyboard = Keyboard()
+
+        clock = [0.0]
+        driver = GeminiDriver("http://127.0.0.1:1")
+        driver._try_ensure_fixed_model = lambda _page: clock[0] >= 20.0  # type: ignore[method-assign]
+
+        with (
+            mock.patch("browser_chat_bridge.gemini.time.monotonic", side_effect=lambda: clock[0]),
+            mock.patch("browser_chat_bridge.gemini.time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)),
+        ):
+            self.assertTrue(driver._ensure_fixed_model(Page()))
 
     def test_bound_history_requires_one_complete_hydrated_pair(self):
         self.assertGreaterEqual(BOUND_HISTORY_TIMEOUT_S, 30.0)

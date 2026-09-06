@@ -549,7 +549,7 @@ class GeminiDriver:
         # Angular's mode menu finishes its first render/animation. A later
         # read of the same page succeeds without navigation, so retry only this
         # pre-dispatch UI setup for a short bounded window.
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + MODEL_SETUP_TIMEOUT_S
         while time.monotonic() < deadline:
             try:
                 if self._try_ensure_fixed_model(page):
