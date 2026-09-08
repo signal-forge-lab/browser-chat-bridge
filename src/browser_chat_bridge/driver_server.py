@@ -95,7 +95,7 @@ class DriverHandler(JsonHandler):
                     "runtime_rebind": True,
                     "backend": self.backend_kind,
                     "cdp_endpoint": self.runtime.cdp_endpoint or None,
-                    "fixed_model": "Gemini 3.8 Flash / 強化版思考モード",
+                    "fixed_model": "Gemini 3.8 Flash (Spark implicit; no selector)",
                 },
             )
             return

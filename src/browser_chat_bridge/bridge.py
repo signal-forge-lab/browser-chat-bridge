@@ -11,7 +11,7 @@ from .store import BridgeStore
 DriverCall = Callable[[dict[str, Any]], dict[str, Any]]
 PreDispatchCall = Callable[[], None]
 LOCAL_ONLY_CLEANUP_STATUSES = frozenset(
-    {"NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY"}
+    {"NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY", "COMPLETED"}
 )
 
 
@@ -44,7 +44,7 @@ class BridgeService:
         self._run_locks: dict[str, threading.Lock] = {}
         self._capacity_guard = threading.Lock()
         self._in_flight = 0
-        # Gemini may promote a new /app send into a separate durable target.
+        # Spark may promote a new /spark send into a separate durable target.
         # Serialize only unbound first turns so that target promotion can be
         # correlated without cross-run ambiguity; bound runs still parallelize.
         self._new_conversation_lock = threading.Lock()
@@ -138,7 +138,10 @@ class BridgeService:
                 if result.get("status") == "COMPLETED":
                     conversation_id = str(result.get("conversation_id") or "")
                     conversation_url = str(result.get("conversation_url") or "")
-                    if not conversation_id or not conversation_url:
+                    execution_kind = str(result.get("execution_kind") or "")
+                    if not conversation_id and not conversation_url and execution_kind == "task":
+                        pass
+                    elif not conversation_id or not conversation_url:
                         result = {
                             **result,
                             "status": "AMBIGUOUS",

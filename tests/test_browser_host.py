@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from browser_chat_bridge.browser_host import NodriverManagedEdge, endpoint_alive
+from browser_chat_bridge.browser_host import NodriverManagedEdge, endpoint_alive, repair_nodriver_network_source
 
 
 class FakeConfig:
@@ -32,6 +32,15 @@ class FakeBrowser:
 
 
 class BrowserHostTests(unittest.TestCase):
+    def test_repair_nodriver_network_source_rewrites_only_the_known_cp1252_plusminus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nodriver" / "cdp" / "network.py"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"# generated\n#: JSON (\xb1Inf).\n")
+            self.assertTrue(repair_nodriver_network_source(path))
+            self.assertEqual(path.read_bytes(), b"# generated\n#: JSON (\xc2\xb1Inf).\n")
+            self.assertFalse(repair_nodriver_network_source(path))
+
     def test_endpoint_alive_reports_cdp_loss(self):
         response = type("Response", (), {"__enter__": lambda self: self, "__exit__": lambda self, *args: False, "status": 200})()
         with patch("browser_chat_bridge.browser_host.urlopen", return_value=response):
@@ -62,7 +71,7 @@ class BrowserHostTests(unittest.TestCase):
                 start_fn=start_fn,
             )
             self.assertEqual(managed.start(), "http://127.0.0.1:45678")
-            self.assertEqual(fake.urls, [("https://gemini.google.com/app", True)])
+            self.assertEqual(fake.urls, [("https://gemini.google.com/spark", True)])
             managed.stop()
             self.assertTrue(fake.stopped)
 

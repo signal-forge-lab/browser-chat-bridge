@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from unittest import mock
 
 from browser_chat_bridge.gemini import (
     BOUND_HISTORY_TIMEOUT_S,
     CDP_CONNECT_TIMEOUT_MS,
-    MODEL_SETUP_TIMEOUT_S,
     GeminiDriver,
     bound_history_hydrated,
     composer_prompt_matches,
     durable_urls_from_target_rows,
-    flash_model_item,
-    fixed_model_selected,
     normalize_text,
     parse_conversation_id,
     prompt_matches,
@@ -28,27 +24,6 @@ class GeminiContractTests(unittest.TestCase):
         # healthy local browser as TARGET_LOST at the old boundary.
         self.assertGreaterEqual(CDP_CONNECT_TIMEOUT_MS, 30_000)
 
-    def test_model_setup_budget_tolerates_slow_fresh_tab_hydration(self):
-        self.assertGreaterEqual(MODEL_SETUP_TIMEOUT_S, 30.0)
-
-    def test_fixed_model_setup_uses_the_declared_fresh_tab_budget(self):
-        class Keyboard:
-            def press(self, _key):
-                return None
-
-        class Page:
-            keyboard = Keyboard()
-
-        clock = [0.0]
-        driver = GeminiDriver("http://127.0.0.1:1")
-        driver._try_ensure_fixed_model = lambda _page: clock[0] >= 20.0  # type: ignore[method-assign]
-
-        with (
-            mock.patch("browser_chat_bridge.gemini.time.monotonic", side_effect=lambda: clock[0]),
-            mock.patch("browser_chat_bridge.gemini.time.sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)),
-        ):
-            self.assertTrue(driver._ensure_fixed_model(Page()))
-
     def test_bound_history_requires_one_complete_hydrated_pair(self):
         self.assertGreaterEqual(BOUND_HISTORY_TIMEOUT_S, 30.0)
         self.assertTrue(bound_history_hydrated(1, 1, True, True, True))
@@ -59,27 +34,26 @@ class GeminiContractTests(unittest.TestCase):
         self.assertFalse(bound_history_hydrated(1, 1, True, False, True))
         self.assertFalse(bound_history_hydrated(1, 1, True, True, False))
 
-    def test_conversation_id_comes_from_durable_app_route(self):
+    def test_conversation_id_comes_from_durable_spark_chat_route(self):
         self.assertEqual(
-            parse_conversation_id("https://gemini.google.com/app/491c5405bb57437c"),
+            parse_conversation_id("https://gemini.google.com/spark/chat/491c5405bb57437c"),
             "491c5405bb57437c",
         )
-        self.assertIsNone(parse_conversation_id("https://gemini.google.com/app"))
-        self.assertIsNone(parse_conversation_id("https://example.com/app/abc"))
+        self.assertIsNone(parse_conversation_id("https://gemini.google.com/spark"))
+        self.assertIsNone(parse_conversation_id("https://gemini.google.com/app/abc"))
+        self.assertIsNone(parse_conversation_id("https://example.com/spark/chat/abc"))
 
-    def test_fixed_model_requires_flash_without_lite_plus_expansion(self):
-        self.assertTrue(fixed_model_selected("Flash\n拡張"))
-        self.assertTrue(fixed_model_selected("Flash 拡張"))
-        self.assertFalse(fixed_model_selected("Flash"))
-        self.assertFalse(fixed_model_selected("3.5 Flash-Lite"))
-        self.assertFalse(fixed_model_selected("Flash-Lite 拡張"))
-        self.assertFalse(fixed_model_selected("Pro 拡張"))
+    def test_first_turn_destination_accepts_spark_tasks_without_waiting_for_chat_promotion(self):
+        class Page:
+            url = "https://gemini.google.com/spark/tasks"
 
-    def test_flash_model_item_uses_flash_without_lite_not_version_number(self):
-        self.assertTrue(flash_model_item("3.8 Flash\nあらゆる場面でサポート"))
-        self.assertTrue(flash_model_item("3.6 Flash\nあらゆる場面でサポート"))
-        self.assertFalse(flash_model_item("3.5 Flash-Lite\nすばやく回答を得るのに最適"))
-        self.assertFalse(flash_model_item("3.1 Pro\n高度な推論"))
+        driver = GeminiDriver("http://127.0.0.1:1")
+        driver._cdp_durable_urls = lambda: set()  # type: ignore[method-assign]
+
+        self.assertEqual(
+            driver._wait_first_turn_destination(Page(), set()),
+            ("task", None),
+        )
 
     def test_prompt_confirmation_normalizes_only_line_endings_and_outer_space(self):
         self.assertTrue(prompt_matches("hello\r\nworld", "hello\nworld"))
@@ -120,14 +94,14 @@ class GeminiContractTests(unittest.TestCase):
 
         class Context:
             pages = [
-                Page("https://gemini.google.com/app"),
-                Page("https://gemini.google.com/app#bcb-old"),
-                Page("https://gemini.google.com/app#bcb-new"),
+                Page("https://gemini.google.com/spark"),
+                Page("https://gemini.google.com/spark#bcb-old"),
+                Page("https://gemini.google.com/spark#bcb-new"),
             ]
 
-        selected = GeminiDriver._find_page(Context(), "https://gemini.google.com/app#bcb-new")
+        selected = GeminiDriver._find_page(Context(), "https://gemini.google.com/spark#bcb-new")
         self.assertIsNotNone(selected)
-        self.assertEqual(selected.url, "https://gemini.google.com/app#bcb-new")
+        self.assertEqual(selected.url, "https://gemini.google.com/spark#bcb-new")
 
     def test_reattach_retries_when_first_connection_does_not_enumerate_target(self):
         class Page:
@@ -146,9 +120,9 @@ class GeminiContractTests(unittest.TestCase):
             def close(self):
                 self.closed += 1
 
-        target_url = "https://gemini.google.com/app#bcb-new"
+        target_url = "https://gemini.google.com/spark#bcb-new"
         initial = Browser([])
-        first_reattach = Browser([Page("https://gemini.google.com/app")])
+        first_reattach = Browser([Page("https://gemini.google.com/spark")])
         second_reattach = Browser([Page(target_url)])
         driver = GeminiDriver("http://127.0.0.1:1")
         candidates = iter([first_reattach, second_reattach])
@@ -165,14 +139,14 @@ class GeminiContractTests(unittest.TestCase):
 
     def test_durable_target_rows_extract_only_gemini_conversations(self):
         rows = [
-            {"type": "page", "url": "https://gemini.google.com/app/abc123"},
-            {"type": "page", "url": "https://gemini.google.com/app"},
-            {"type": "page", "url": "https://example.com/app/ignored"},
-            {"type": "service_worker", "url": "https://gemini.google.com/app/worker"},
+            {"type": "page", "url": "https://gemini.google.com/spark/chat/abc123"},
+            {"type": "page", "url": "https://gemini.google.com/spark"},
+            {"type": "page", "url": "https://example.com/spark/chat/ignored"},
+            {"type": "service_worker", "url": "https://gemini.google.com/spark/chat/worker"},
         ]
         self.assertEqual(
             durable_urls_from_target_rows(rows),
-            {"https://gemini.google.com/app/abc123"},
+            {"https://gemini.google.com/spark/chat/abc123"},
         )
 
     def test_automation_page_close_is_best_effort(self):

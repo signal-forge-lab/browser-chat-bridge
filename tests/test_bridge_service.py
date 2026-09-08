@@ -26,7 +26,7 @@ class BridgeServiceTests(unittest.TestCase):
             return {
                 "status": "COMPLETED",
                 "conversation_id": "abc123",
-                "conversation_url": "https://gemini.google.com/app/abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
                 "content": "answer",
             }
 
@@ -40,6 +40,36 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         run = store.get_run("run-1")
         self.assertEqual(run["conversation_id"], "abc123")
+
+    def test_completed_spark_task_is_idempotent_without_durable_chat_binding(self):
+        service, store = self.make_service()
+        calls = []
+
+        def driver(request):
+            calls.append(request)
+            return {
+                "status": "COMPLETED",
+                "execution_kind": "task",
+                "conversation_id": None,
+                "conversation_url": None,
+                "content": "READ_SENTINEL_7391",
+            }
+
+        first = service.run_turn("run-task", "req-task", "read file", driver)
+        second = service.run_turn("run-task", "req-task", "read file", driver)
+
+        self.assertEqual(first["status"], "COMPLETED")
+        self.assertEqual(first["content"], "READ_SENTINEL_7391")
+        self.assertTrue(second["cached"])
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(store.get_run("run-task")["conversation_url"])
+
+        cleanup_calls = []
+        self.assertEqual(
+            service.cleanup_run("run-task", lambda request: cleanup_calls.append(request)),
+            {"status": "DELETED", "run_id": "run-task"},
+        )
+        self.assertEqual(cleanup_calls, [])
 
     def test_driver_transport_failure_becomes_ambiguous_and_never_blind_resends(self):
         service, _store = self.make_service()
@@ -112,7 +142,7 @@ class BridgeServiceTests(unittest.TestCase):
             return {
                 "status": "COMPLETED",
                 "conversation_id": f"c{run_number}",
-                "conversation_url": f"https://gemini.google.com/app/c{run_number}",
+                "conversation_url": f"https://gemini.google.com/spark/chat/c{run_number}",
                 "content": f"a{run_number}",
             }
 
@@ -133,7 +163,7 @@ class BridgeServiceTests(unittest.TestCase):
                 lambda _request: {
                     "status": "COMPLETED",
                     "conversation_id": run_id,
-                    "conversation_url": f"https://gemini.google.com/app/{run_id}",
+                    "conversation_url": f"https://gemini.google.com/spark/chat/{run_id}",
                     "content": "bound",
                 },
             )
@@ -150,7 +180,7 @@ class BridgeServiceTests(unittest.TestCase):
             return {
                 "status": "COMPLETED",
                 "conversation_id": "unused",
-                "conversation_url": "https://gemini.google.com/app/unused",
+                "conversation_url": "https://gemini.google.com/spark/chat/unused",
                 "content": "done",
             }
 
@@ -207,7 +237,7 @@ class BridgeServiceTests(unittest.TestCase):
             return {
                 "status": "COMPLETED",
                 "conversation_id": "abc123",
-                "conversation_url": "https://gemini.google.com/app/abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
                 "content": "answer",
             }
 
@@ -223,7 +253,7 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual(result, {"status": "DELETED", "run_id": "run-1"})
         self.assertEqual(
             cleanup_calls,
-            [{"conversation_url": "https://gemini.google.com/app/abc123"}],
+            [{"conversation_url": "https://gemini.google.com/spark/chat/abc123"}],
         )
         self.assertIsNone(store.get_run("run-1"))
         self.assertIsNone(store.get_turn("req-1"))
@@ -235,7 +265,7 @@ class BridgeServiceTests(unittest.TestCase):
             return {
                 "status": "COMPLETED",
                 "conversation_id": "abc123",
-                "conversation_url": "https://gemini.google.com/app/abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
                 "content": "answer",
             }
 
@@ -262,7 +292,7 @@ class BridgeServiceTests(unittest.TestCase):
             return {
                 "status": "TIMEOUT",
                 "conversation_id": "slow123",
-                "conversation_url": "https://gemini.google.com/app/slow123",
+                "conversation_url": "https://gemini.google.com/spark/chat/slow123",
                 "content": None,
                 "error": "response timed out",
             }
@@ -279,7 +309,7 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "DELETED")
         self.assertEqual(
             calls,
-            [{"conversation_url": "https://gemini.google.com/app/slow123"}],
+            [{"conversation_url": "https://gemini.google.com/spark/chat/slow123"}],
         )
         self.assertIsNone(store.get_run("run-1"))
 

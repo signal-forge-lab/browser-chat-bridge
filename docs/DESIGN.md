@@ -2,10 +2,11 @@
 
 ## Contract
 
-One DSH run owns one server-side Gemini conversation. Turns inside that run reuse
-the same conversation; a different run starts a different conversation. The
-cloud chat is the conversation-history authority, so callers send only the new
-prompt for the current turn.
+One DSH run normally owns one server-side Spark conversation. Turns inside that
+run reuse the same conversation; a different run starts a different
+conversation. Spark file-tool tasks may instead complete as an unbound
+`/spark/tasks` execution. The cloud chat/task UI is the browser-side authority,
+so callers send only the new prompt for the current turn.
 
 ```text
 DSH / caller
@@ -30,26 +31,28 @@ POST /v1/runs/{run_id}/turn
 calling the Driver. If the Driver connection disappears after that point, the
 result is `AMBIGUOUS` and the same request is never blindly resent.
 
-The first completed turn binds:
+The first completed durable chat turn binds:
 
 ```text
 run_id -> conversation_id + conversation_url
 ```
 
-Later turns must return the exact same binding or fail closed with
-`CONVERSATION_MISMATCH`.
+Later durable chat turns must return the exact same binding or fail closed with
+`CONVERSATION_MISMATCH`. A completed `/spark/tasks` execution is intentionally
+unbound and is cached by `request_id` without creating a run conversation
+binding.
 
-Fresh runs open `/app#bcb-<random>` in a background target. The fragment is not
+Fresh runs open `/spark#bcb-<random>` in a background target. The fragment is not
 sent in HTTP requests and exists only to distinguish the newly created target
-from stale empty `/app` tabs during the CDP reconnect.
+from stale empty `/spark` tabs during the CDP reconnect.
 
-After the exact first User turn is proven persisted, Gemini may create the
-durable `/app/<conversation-id>` target after the current Playwright CDP attach.
-That attach does not reliably learn about later targets. The Driver therefore
-observes only the loopback CDP `/json/list` registry, waits for exactly one new
-durable Gemini URL relative to the pre-send baseline, and then reattaches
-Playwright once to hydrate that exact target. It does not poll Gemini backend
-conversation APIs for discovery.
+After the exact first User turn is proven persisted, Spark either promotes the
+turn to durable `/spark/chat/<conversation-id>` or moves the execution to
+`/spark/tasks`. A Playwright CDP attach does not reliably learn about targets
+created after that attach. The Driver therefore observes the loopback CDP
+registry and page URL, accepts a correlated Spark task page immediately, or
+reattaches Playwright to the single new durable chat target. It does not poll
+Gemini backend conversation APIs for discovery.
 
 ## Driver interface
 
@@ -57,7 +60,7 @@ conversation APIs for discovery.
 POST /v1/turn
 {
   "request_id": "...",
-  "conversation_url": null | "https://gemini.google.com/app/<id>",
+  "conversation_url": null | "https://gemini.google.com/spark/chat/<id>",
   "prompt": "..."
 }
 ```
@@ -73,11 +76,10 @@ connections, so no run-global browser mutex is required.
 
 ## Fixed model
 
-Every turn verifies the Gemini picker before touching the composer. The required
-state is Gemini 3.8 Flash with `強化版思考モード`; the Driver identifies the
-middle Flash family as `Flash` present with `Lite` absent, then requires the
-selected pill summary to include `拡張`. If the fixed state cannot be proven or
-repaired, the Driver returns `MODEL_MISMATCH` and sends nothing.
+Spark exposes no model picker. The route implicitly uses Gemini 3.8 Flash, so
+the Driver performs no model-selection UI interaction. The logical DSH model id
+may remain `gemini-3.8-flash-ui`; it denotes the Spark route, not an explicit UI
+selection.
 
 ## Dispatch safety
 
@@ -102,9 +104,9 @@ The response is the single next `model-response`. Completion requires all of:
 
 The returned text comes only from that anchored model response.
 
-Enhanced mode can delay publication/hydration of the fresh durable target for
-around a minute. `CHAT_DRIVER_PROMOTION_TIMEOUT_S` defaults to 120 seconds and
-governs this structural wait; it is not a fixed sleep.
+Spark can delay publication/hydration of a fresh durable chat or task target.
+`CHAT_DRIVER_PROMOTION_TIMEOUT_S` defaults to 120 seconds and governs this
+structural wait; it is not a fixed sleep.
 
 ## Chromium and Obscura
 
@@ -117,7 +119,7 @@ CHAT_DRIVER_CDP_ENDPOINT=http://127.0.0.1:<port>
 
 Chromium is the production baseline because the Gemini contract was live-probed
 there. Obscura is implemented at the same seam but remains shadow/experimental
-until authenticated Gemini hydration, model selection, send confirmation, and
+until authenticated Spark hydration, send confirmation, and
 response completion all pass repeatedly. No Google authentication cookies are
 copied into Obscura automatically.
 

@@ -11,11 +11,9 @@ from urllib.parse import urlsplit
 
 
 GEMINI_ORIGIN = "https://gemini.google.com"
-NEW_CHAT_URL = f"{GEMINI_ORIGIN}/app"
+NEW_CHAT_URL = f"{GEMINI_ORIGIN}/spark"
 
 COMPOSER_SELECTOR = 'rich-textarea div[contenteditable="true"][role="textbox"]'
-MODEL_BUTTON_SELECTOR = 'button[data-test-id="bard-mode-menu-button"]'
-MODEL_ITEM_SELECTOR = 'gem-menu-item[role="menuitem"]'
 SEND_BUTTON_SELECTOR = (
     'div[data-test-id="send-button-container"] button[aria-label="プロンプトを送信"]'
 )
@@ -29,12 +27,9 @@ DELETE_MENU_ITEM_SELECTOR = 'gem-menu-item[data-test-id="delete-button"]'
 DELETE_DIALOG_SELECTOR = '[role="dialog"]'
 DELETE_CONFIRM_SELECTOR = 'gem-button[cdkfocusinitial] button'
 
-ENHANCED_MODE_LABEL = "強化版思考モード"
-FIXED_MODEL_PRIMARY = "Flash"
-FIXED_MODEL_SECONDARY = "拡張"
 CDP_CONNECT_TIMEOUT_MS = 30_000
 CDP_CONNECT_ATTEMPTS = 3
-MODEL_SETUP_TIMEOUT_S = 30.0
+PAGE_REATTACH_TIMEOUT_S = 30.0
 BOUND_HISTORY_TIMEOUT_S = 30.0
 
 
@@ -103,25 +98,11 @@ def bound_history_hydrated(
     )
 
 
-def fixed_model_selected(button_text: str) -> bool:
-    summary = " ".join(normalize_text(button_text).split()).casefold()
-    return (
-        FIXED_MODEL_PRIMARY.casefold() in summary
-        and "lite" not in summary
-        and FIXED_MODEL_SECONDARY in summary
-    )
-
-
-def flash_model_item(item_text: str) -> bool:
-    summary = " ".join(normalize_text(item_text).split()).casefold()
-    return FIXED_MODEL_PRIMARY.casefold() in summary and "lite" not in summary
-
-
 def parse_conversation_id(url: str) -> str | None:
     parsed = urlsplit(str(url or ""))
     if parsed.scheme != "https" or parsed.netloc != "gemini.google.com":
         return None
-    match = re.fullmatch(r"/app/([A-Za-z0-9_-]+)(?:/)?", parsed.path)
+    match = re.fullmatch(r"/spark/chat/([A-Za-z0-9_-]+)(?:/)?", parsed.path)
     return None if match is None else match.group(1)
 
 
@@ -132,7 +113,7 @@ def durable_urls_from_target_rows(rows: list[dict[str, Any]]) -> set[str]:
             continue
         conversation_id = parse_conversation_id(str(row.get("url") or ""))
         if conversation_id is not None:
-            urls.add(f"{GEMINI_ORIGIN}/app/{conversation_id}")
+            urls.add(f"{GEMINI_ORIGIN}/spark/chat/{conversation_id}")
     return urls
 
 
@@ -143,15 +124,19 @@ class DriverResult:
     conversation_url: str | None = None
     content: str | None = None
     error: str | None = None
+    execution_kind: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "status": self.status,
             "conversation_id": self.conversation_id,
             "conversation_url": self.conversation_url,
             "content": self.content,
             "error": self.error,
         }
+        if self.execution_kind is not None:
+            result["execution_kind"] = self.execution_kind
+        return result
 
 
 @dataclass(frozen=True)
@@ -261,22 +246,39 @@ class GeminiDriver:
                     return dispatch.as_dict()
 
                 if requested_url is None:
-                    # Gemini promotes a fresh /app submission into a separate
-                    # durable target. A Playwright CDP connection does not
-                    # reliably learn about targets created after that attach,
-                    # so observe Chrome's local /json/list first and reconnect
-                    # exactly once after the new durable URL exists.
-                    promoted_url = self._wait_promoted_url(
-                        set(dispatch.baseline_durable_urls)
+                    destination, promoted_url = self._wait_first_turn_destination(
+                        page,
+                        set(dispatch.baseline_durable_urls),
                     )
-                    if promoted_url is None:
+                    if destination == "task":
+                        response = self._wait_response(
+                            page,
+                            dispatch.baseline_responses,
+                            None,
+                            None,
+                            prompt,
+                            execution_kind="task",
+                        )
+                        promoted_id = parse_conversation_id(page.url)
+                        if response.status == "COMPLETED" and promoted_id is not None:
+                            response = DriverResult(
+                                "COMPLETED",
+                                promoted_id,
+                                f"{GEMINI_ORIGIN}/spark/chat/{promoted_id}",
+                                content=response.content,
+                                execution_kind="chat",
+                            )
+                        if page_created_here and response.status in {"COMPLETED", "TASK_FAILED"}:
+                            self._close_page_quietly(page)
+                        return response.as_dict()
+                    if destination != "chat" or promoted_url is None:
                         return DriverResult(
                             "AMBIGUOUS",
                             error="user turn persisted but durable conversation target was not correlated",
                         ).as_dict()
                     # Do not close the automation-owned page before resolving
-                    # the durable route. Gemini promotes the same browser
-                    # target from /app#bcb-* to /app/<conversation-id> on this
+                    # the durable route. Spark promotes the same browser
+                    # target from /spark#bcb-* to /spark/chat/<conversation-id> on this
                     # Edge profile. Closing the marker page here therefore
                     # closes the promoted conversation itself and makes the
                     # subsequent attach unable to enumerate it. Disconnecting
@@ -307,7 +309,7 @@ class GeminiDriver:
                         "AMBIGUOUS",
                         error="user turn persisted but durable conversation id was not resolved",
                     ).as_dict()
-                conversation_url = f"{GEMINI_ORIGIN}/app/{conversation_id}"
+                conversation_url = f"{GEMINI_ORIGIN}/spark/chat/{conversation_id}"
                 response = self._wait_response(
                     page,
                     dispatch.baseline_responses,
@@ -462,7 +464,7 @@ class GeminiDriver:
             return page
         return None
 
-    def _reattach_find_page(self, playwright, browser, url: str, *, timeout_s: float = MODEL_SETUP_TIMEOUT_S):
+    def _reattach_find_page(self, playwright, browser, url: str, *, timeout_s: float = PAGE_REATTACH_TIMEOUT_S):
         """Reconnect until one attach initially enumerates the exact target.
 
         In the shared Edge profile, a target created through browser-level CDP
@@ -544,90 +546,6 @@ class GeminiDriver:
             time.sleep(0.2)
         return False
 
-    def _ensure_fixed_model(self, page) -> bool:
-        # On a newly created Gemini tab the composer can become usable before
-        # Angular's mode menu finishes its first render/animation. A later
-        # read of the same page succeeds without navigation, so retry only this
-        # pre-dispatch UI setup for a short bounded window.
-        deadline = time.monotonic() + MODEL_SETUP_TIMEOUT_S
-        while time.monotonic() < deadline:
-            try:
-                if self._try_ensure_fixed_model(page):
-                    return True
-            except Exception:
-                # A click/wait timeout here is still pre-dispatch. Treat it as
-                # transient UI readiness, never as an ambiguous send.
-                pass
-            try:
-                page.keyboard.press("Escape")
-            except Exception:
-                pass
-            time.sleep(0.5)
-        return False
-
-    def _try_ensure_fixed_model(self, page) -> bool:
-        button = page.locator(MODEL_BUTTON_SELECTOR)
-        if button.count() != 1:
-            return False
-        if fixed_model_selected(button.inner_text()):
-            return True
-
-        button.click(timeout=5_000)
-        items = page.locator(MODEL_ITEM_SELECTOR)
-        try:
-            items.first.wait_for(state="visible", timeout=5_000)
-        except Exception:
-            return False
-        base_indexes = [
-            index
-            for index, text in enumerate(items.all_inner_texts())
-            if flash_model_item(text)
-        ]
-        if len(base_indexes) != 1:
-            return False
-        base = items.nth(base_indexes[0])
-        base.click(timeout=5_000)
-        try:
-            items.first.wait_for(state="hidden", timeout=5_000)
-        except Exception:
-            return False
-
-        # Selecting the non-Lite Flash option preserves the independent
-        # enhanced-mode toggle.
-        # If it was already enabled, the summary becomes "Flash 拡張" and we
-        # must not click the toggle again (which would turn it off).
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            try:
-                if fixed_model_selected(button.inner_text()):
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.1)
-
-        button.click(timeout=5_000)
-        try:
-            items.first.wait_for(state="visible", timeout=5_000)
-        except Exception:
-            return False
-        enhanced = items.filter(has_text=ENHANCED_MODE_LABEL)
-        if enhanced.count() != 1:
-            return False
-        enhanced.click(timeout=5_000)
-        try:
-            items.first.wait_for(state="hidden", timeout=5_000)
-        except Exception:
-            return False
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            try:
-                if fixed_model_selected(button.inner_text()):
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.1)
-        return False
-
     @staticmethod
     def _counts(page) -> tuple[int, int]:
         return page.locator(USER_QUERY_SELECTOR).count(), page.locator(MODEL_RESPONSE_SELECTOR).count()
@@ -635,7 +553,7 @@ class GeminiDriver:
     @staticmethod
     def _durable_urls(context) -> set[str]:
         return {
-            f"{GEMINI_ORIGIN}/app/{conversation_id}"
+            f"{GEMINI_ORIGIN}/spark/chat/{conversation_id}"
             for candidate in context.pages
             if (conversation_id := parse_conversation_id(candidate.url)) is not None
         }
@@ -653,16 +571,23 @@ class GeminiDriver:
             return set()
         return durable_urls_from_target_rows(rows)
 
-    def _wait_promoted_url(self, baseline_urls: set[str]) -> str | None:
+    def _wait_first_turn_destination(self, page, baseline_urls: set[str]) -> tuple[str | None, str | None]:
         deadline = time.monotonic() + self.promotion_timeout_s
         while time.monotonic() < deadline:
             candidates = self._cdp_durable_urls() - baseline_urls
             if len(candidates) == 1:
-                return next(iter(candidates))
+                return "chat", next(iter(candidates))
             if len(candidates) > 1:
-                return None
+                return None, None
+            parsed = urlsplit(str(page.url or ""))
+            if (
+                parsed.scheme == "https"
+                and parsed.netloc == "gemini.google.com"
+                and parsed.path.rstrip("/") == "/spark/tasks"
+            ):
+                return "task", None
             time.sleep(0.15)
-        return None
+        return None, None
 
     @staticmethod
     def _page_last_prompt_matches(page, prompt: str) -> bool:
@@ -695,8 +620,6 @@ class GeminiDriver:
         if not self._wait_for_ready(page):
             status = "AUTH_REQUIRED" if "accounts.google.com" in page.url else "TARGET_LOST"
             return DriverResult(status, error="Gemini composer did not become ready")
-        if not self._ensure_fixed_model(page):
-            return DriverResult("MODEL_MISMATCH", error="3.8 Flash enhanced mode could not be verified")
 
         baseline_durable_urls = self._cdp_durable_urls()
         if not baseline_durable_urls:
@@ -755,9 +678,11 @@ class GeminiDriver:
         self,
         page,
         baseline_responses: int,
-        conversation_id: str,
-        conversation_url: str,
+        conversation_id: str | None,
+        conversation_url: str | None,
         expected_prompt: str,
+        *,
+        execution_kind: str = "chat",
     ) -> DriverResult:
         response_deadline = time.monotonic() + self.response_timeout_s
         expected_responses = baseline_responses + 1
@@ -773,6 +698,7 @@ class GeminiDriver:
                         conversation_id,
                         conversation_url,
                         error="more than one new model response appeared",
+                        execution_kind=execution_kind,
                     )
                 if count == expected_responses:
                     response = responses.last
@@ -782,6 +708,12 @@ class GeminiDriver:
                         busy = content.get_attribute("aria-busy")
                         text = normalize_text(content.inner_text())
                         if footer_complete and busy == "false" and text:
+                            if execution_kind == "task" and text.startswith("Something went wrong"):
+                                return DriverResult(
+                                    "TASK_FAILED",
+                                    error=text,
+                                    execution_kind="task",
+                                )
                             if not self._page_last_prompt_matches(page, expected_prompt):
                                 time.sleep(0.2)
                                 continue
@@ -796,6 +728,7 @@ class GeminiDriver:
                                     conversation_id,
                                     conversation_url,
                                     content=text,
+                                    execution_kind=execution_kind,
                                 )
             except Exception:
                 pass
@@ -806,5 +739,6 @@ class GeminiDriver:
             conversation_id,
             conversation_url,
             error="confirmed user turn did not reach structural Gemini completion before timeout",
+            execution_kind=execution_kind,
         )
 

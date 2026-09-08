@@ -7,6 +7,7 @@ import ipaddress
 import inspect
 import os
 import shutil
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Awaitable, Callable, cast
@@ -16,6 +17,36 @@ from urllib.request import urlopen
 
 class BrowserHostError(RuntimeError):
     pass
+
+
+def repair_nodriver_network_source(path: Path) -> bool:
+    """Repair nodriver 0.50.x's one malformed CP1252 byte in generated CDP source."""
+    candidate = Path(path)
+    if candidate.name.lower() != "network.py":
+        return False
+    parts = tuple(part.lower() for part in candidate.parts)
+    if len(parts) < 3 or parts[-3:] != ("nodriver", "cdp", "network.py"):
+        return False
+    raw = candidate.read_bytes()
+    broken = b"#: JSON (\xb1Inf)."
+    if raw.count(broken) != 1:
+        return False
+    candidate.write_bytes(raw.replace(broken, b"#: JSON (\xc2\xb1Inf)."))
+    return True
+
+
+def _import_nodriver():
+    try:
+        return importlib.import_module("nodriver")
+    except SyntaxError as exc:
+        filename = getattr(exc, "filename", None)
+        if not filename or not repair_nodriver_network_source(Path(filename)):
+            raise
+        # Failed package imports can leave successfully imported siblings in
+        # sys.modules. Drop only nodriver's namespace before the one retry.
+        for name in [name for name in sys.modules if name == "nodriver" or name.startswith("nodriver.")]:
+            sys.modules.pop(name, None)
+        return importlib.import_module("nodriver")
 
 
 def endpoint_alive(endpoint: str, timeout_s: float = 1.0) -> bool:
@@ -89,13 +120,13 @@ class NodriverManagedEdge:
         *,
         profile_dir: Path,
         browser_executable: str | None = None,
-        start_url: str = "https://gemini.google.com/app",
+        start_url: str = "https://gemini.google.com/spark",
         attach_endpoint: str | None = None,
         start_fn: Callable[..., Any] | None = None,
     ):
         self.profile_dir = Path(profile_dir).expanduser().resolve()
         self.browser_executable = resolve_edge_executable(browser_executable)
-        self.start_url = str(start_url or "https://gemini.google.com/app")
+        self.start_url = str(start_url or "https://gemini.google.com/spark")
         self.attach_endpoint = str(attach_endpoint or "").strip()
         self._start_fn = start_fn
         self._ready = threading.Event()
@@ -177,7 +208,7 @@ class NodriverManagedEdge:
         attached_existing = self.attached_existing
         if start_fn is None:
             try:
-                uc = importlib.import_module("nodriver")
+                uc = _import_nodriver()
             except ModuleNotFoundError as exc:
                 raise BrowserHostError(
                     "Browser Chat Edge requires nodriver; install the project dependencies"
