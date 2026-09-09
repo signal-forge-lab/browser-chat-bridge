@@ -5,6 +5,7 @@ import unittest
 from browser_chat_bridge.gemini import (
     BOUND_HISTORY_TIMEOUT_S,
     CDP_CONNECT_TIMEOUT_MS,
+    DISPATCH_CONFIRM_TIMEOUT_S,
     GeminiDriver,
     bound_history_hydrated,
     composer_prompt_matches,
@@ -33,6 +34,12 @@ class GeminiContractTests(unittest.TestCase):
         self.assertFalse(bound_history_hydrated(1, 1, False, True, True))
         self.assertFalse(bound_history_hydrated(1, 1, True, False, True))
         self.assertFalse(bound_history_hydrated(1, 1, True, True, False))
+
+    def test_dispatch_confirmation_budget_covers_slow_workspace_persistence(self):
+        # Live Spark Drive-backed prompts have persisted their exact user-query
+        # after the old 15 s window. Keep exact matching, but allow enough time
+        # for the durable user turn to appear before declaring ambiguity.
+        self.assertGreaterEqual(DISPATCH_CONFIRM_TIMEOUT_S, 45.0)
 
     def test_conversation_id_comes_from_durable_spark_chat_route(self):
         self.assertEqual(

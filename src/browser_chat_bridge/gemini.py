@@ -31,6 +31,7 @@ CDP_CONNECT_TIMEOUT_MS = 30_000
 CDP_CONNECT_ATTEMPTS = 3
 PAGE_REATTACH_TIMEOUT_S = 30.0
 BOUND_HISTORY_TIMEOUT_S = 30.0
+DISPATCH_CONFIRM_TIMEOUT_S = 45.0
 
 
 def normalize_text(value: str) -> str:
@@ -660,7 +661,7 @@ class GeminiDriver:
         # Once click() returned, failure to observe the exact new User turn is
         # ambiguous. Never convert this branch to NOT_DISPATCHED; the live probe
         # demonstrated delayed persistence can otherwise duplicate a prompt.
-        dispatch_deadline = time.monotonic() + 15.0
+        dispatch_deadline = time.monotonic() + DISPATCH_CONFIRM_TIMEOUT_S
         confirmed = False
         while time.monotonic() < dispatch_deadline:
             try:
