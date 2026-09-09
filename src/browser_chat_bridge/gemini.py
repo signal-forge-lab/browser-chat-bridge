@@ -505,13 +505,20 @@ class GeminiDriver:
             if "accounts.google.com" in page.url:
                 return False
             try:
-                composer = page.locator(COMPOSER_SELECTOR)
-                if composer.count() == 1 and composer.is_visible():
+                if self._ready_composer(page) is not None:
                     return True
             except Exception:
                 pass
             time.sleep(0.2)
         return False
+
+    @staticmethod
+    def _ready_composer(page):
+        composers = page.locator(COMPOSER_SELECTOR)
+        if composers.count() < 1:
+            return None
+        composer = composers.last
+        return composer if composer.is_visible() else None
 
     def _wait_for_bound_history(self, page) -> bool:
         deadline = time.monotonic() + BOUND_HISTORY_TIMEOUT_S
@@ -630,7 +637,9 @@ class GeminiDriver:
         if baseline_users != baseline_responses:
             return DriverResult("BUSY", error="conversation has an unmatched in-flight turn")
 
-        composer = page.locator(COMPOSER_SELECTOR)
+        composer = self._ready_composer(page)
+        if composer is None:
+            return DriverResult("NOT_DISPATCHED", error="Gemini composer disappeared before dispatch")
         try:
             composer.fill(prompt)
             paragraphs = composer.locator(":scope > p")

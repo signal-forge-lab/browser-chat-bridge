@@ -167,6 +167,33 @@ class GeminiContractTests(unittest.TestCase):
         GeminiDriver._close_page_quietly(failing)
         self.assertEqual(failing.closed, 1)
 
+    def test_ready_composer_prefers_last_visible_spark_chat_input(self):
+        class Composer:
+            def __init__(self, name):
+                self.name = name
+
+            def is_visible(self):
+                return True
+
+        class Locator:
+            def __init__(self):
+                self.items = [Composer("task"), Composer("chat")]
+
+            def count(self):
+                return len(self.items)
+
+            @property
+            def last(self):
+                return self.items[-1]
+
+        class Page:
+            def locator(self, _selector):
+                return Locator()
+
+        composer = GeminiDriver._ready_composer(Page())
+        self.assertIsNotNone(composer)
+        self.assertEqual(composer.name, "chat")
+
 
 if __name__ == "__main__":
     unittest.main()
