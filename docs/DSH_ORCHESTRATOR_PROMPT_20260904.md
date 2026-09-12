@@ -14,15 +14,15 @@ stop at a design proposal or unit-test-only milestone.
 Primary context:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\github\browser-chat-bridge\docs\DSH_ORCHESTRATOR_HANDOFF_20260904.md
+<browser-chat-bridge-repo>\docs\DSH_ORCHESTRATOR_HANDOFF_20260904.md
 ```
 
 Repositories/environments to inspect from their CURRENT state:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\github\browser-chat-bridge
-C:\Users\shogo\Documents\Intelligence Works\github\deepseek-harness
-C:\Users\shogo\Documents\Intelligence Works\tools\dsh-workflow-iw
+<browser-chat-bridge-repo>
+<deepseek-harness-repo>
+<dsh-workflow-repo>
 current effective ~/.dsh profile/deployment configuration
 current Browser Chat Bridge/Driver processes and Chromium CDP endpoint
 ```

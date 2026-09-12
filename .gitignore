@@ -9,6 +9,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+secrets/
+local/
+config.local.*
+local-config.*
 *.pem
 *.key
 *.p12

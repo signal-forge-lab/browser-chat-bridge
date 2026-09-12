@@ -18,7 +18,7 @@ repairs, re-review, operational start/stop instructions, and final commits.
 Repository:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\github\browser-chat-bridge
+<browser-chat-bridge-repo>
 ```
 
 Handoff commit:
@@ -109,7 +109,7 @@ same browser turn. Request IDs are idempotency keys.
 Repository:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\github\deepseek-harness
+<deepseek-harness-repo>
 ```
 
 Observed handoff state:
@@ -160,7 +160,7 @@ implementing.
 Installed package inspected at:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\tools\dsh-workflow-iw
+<dsh-workflow-repo>
 ```
 
 This directory is an installed/deployed package tree, not a Git checkout at

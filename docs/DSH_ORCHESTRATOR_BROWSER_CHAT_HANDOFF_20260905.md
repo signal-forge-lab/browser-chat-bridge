@@ -26,7 +26,7 @@ this document pass in the current checkout and deployed profile.
 Repository:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\github\browser-chat-bridge
+<browser-chat-bridge-repo>
 ```
 
 Current reviewed commit at handoff:
@@ -58,7 +58,7 @@ docs/DSH_BROWSER_CHAT_PROVIDER_PLAN_20260904.md
 Repository family:
 
 ```text
-C:\Users\shogo\Documents\Intelligence Works\github\deepseek-harness
+<deepseek-harness-repo>
 ```
 
 Current Browser Chat provider branch/worktree commit at handoff:
@@ -116,7 +116,7 @@ Edge process. After Bridge admits a real browser-chat turn, it calls Browser
 Host `/ensure`; the host single-flights concurrent ensures, starts or reattaches
 the dedicated Edge, and returns nodriver's random CDP endpoint. Bridge then
 calls Driver `/v1/rebind` before any prompt dispatch. The profile is
-`%LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data`, separate from
+`%LOCALAPPDATA%\BrowserChatBridge\BrowserChatEdge\User Data`, separate from
 Converlay and normal Edge. Never hard-code the dynamic CDP port.
 
 Current health commands live in:
