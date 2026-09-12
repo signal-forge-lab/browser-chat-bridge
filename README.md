@@ -1,5 +1,7 @@
 # Browser Chat Bridge
 
+[English](README.md) | [日本語](README.ja.md)
+
 Local run-scoped bridge for driving a browser-hosted Gemini-compatible chat UI.
 The caller sends one new prompt; the cloud conversation retains history.
 
@@ -14,6 +16,8 @@ python -m browser_chat_bridge.driver_server
 
 python -m browser_chat_bridge.bridge_server
 ```
+
+A safe environment template is available in `.env.example`. Keep machine-specific paths and credentials outside the repository.
 
 Then send a turn:
 
@@ -32,14 +36,13 @@ The Bridge admits at most two newly created turns at once. A third concurrent
 turn returns `BUSY` before Driver dispatch; the `request_id` caches that result,
 so callers can fall back without risking a late duplicate browser send.
 
-Browser Chat now opens `https://gemini.google.com/spark`. Spark implicitly uses
-Gemini 3.8 Flash and exposes no model selector, so the Driver performs no model
-selection UI interaction. Durable conversations are bound by
+Browser Chat opens `https://gemini.google.com/spark`. Spark implicitly uses
+the model exposed by that UI and has no model selector, so the Driver performs
+no model-selection UI interaction. Durable conversations are bound by
 `https://gemini.google.com/spark/chat/<id>`.
 
 `CHAT_DRIVER_BACKEND=obscura` uses the same Driver contract. Production remains
-on Chromium; see
-`docs/OBSCURA_SHADOW_20260904.md`.
+on Chromium; see `docs/OBSCURA_SHADOW_20260904.md`.
 
 See `docs/DESIGN.md` and `docs/GEMINI_DOM_CONTRACT_20260904.md`.
 
@@ -49,11 +52,13 @@ On Windows, Browser Chat owns a dedicated persistent Microsoft Edge profile via
 `nodriver`. Browser Host, Driver, and Bridge stay lightweight and resident, but
 Edge itself is lazy-started only after the Bridge admits a real browser-chat
 turn. The Driver is then rebound to nodriver's dynamic local CDP endpoint. The
-profile is isolated from Converlay and normal Edge:
+profile is isolated from normal Edge and defaults to:
 
 ```text
-%LOCALAPPDATA%\Intelligence Works\BrowserChatEdge\User Data
+%LOCALAPPDATA%\BrowserChatBridge\BrowserChatEdge\User Data
 ```
+
+Override it with `CHAT_BROWSER_PROFILE` when a different local location is required.
 
 Manage the nodriver Edge host, Driver, and Bridge together with:
 
@@ -71,19 +76,22 @@ the returned CDP endpoint before any prompt is sent. If the user later closes
 Edge, it stays closed until the next admitted browser-chat turn, which launches
 it again. A third concurrent turn still receives `BUSY` before this lazy-start
 preflight. `stop.ps1` closes only Browser Chat's recorded services and dedicated
-BrowserChatEdge processes; it does not touch Converlay, normal Edge, or the
-legacy AegisChrome profile.
+BrowserChatEdge processes; it does not touch unrelated Edge processes.
 
 ## DSH integration handoff
 
-For a fresh AI or DSH orchestrator that should implement the remaining DSH
-integration end-to-end, including live verification and independent review, use:
+For a fresh AI or DSH orchestrator implementing DSH integration end-to-end,
+including live verification and independent review, use:
 
 - `docs/DSH_ORCHESTRATOR_HANDOFF_20260904.md` — current contracts, design
   constraints, acceptance matrix, and review/completion gates.
 - `docs/DSH_ORCHESTRATOR_PROMPT_20260904.md` — copyable top-level execution
   prompt with the recommended parallel lanes and model-depth assignments.
 - `docs/DSH_BROWSER_CHAT_PROVIDER_PLAN_20260904.md` — frozen implementation
-  contract and plan for the DSH `browser-chat` subagent provider, with the
-  staged change set and apply procedure.
+  contract and plan for the DSH `browser-chat` subagent provider.
 
+## Public repository boundary
+
+All public branches must remain safe to disclose. Do not commit credentials,
+real workstation paths, browser profile data, runtime logs, local worktrees, or
+private integration state.
