@@ -5,3 +5,19 @@ __pycache__/
 *.egg-info/
 .worktrees/
 
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local logs and build output
+*.log
+build/
+dist/
+
+# Local workspace metadata
+.workbridge/
