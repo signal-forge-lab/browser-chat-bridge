@@ -95,3 +95,7 @@ including live verification and independent review, use:
 All public branches must remain safe to disclose. Do not commit credentials,
 real workstation paths, browser profile data, runtime logs, local worktrees, or
 private integration state.
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE` for details.
