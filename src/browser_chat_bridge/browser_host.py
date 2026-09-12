@@ -105,7 +105,7 @@ def default_profile_dir() -> Path:
     if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
         return (
             Path(os.environ["LOCALAPPDATA"])
-            / "Intelligence Works"
+            / "BrowserChatBridge"
             / "BrowserChatEdge"
             / "User Data"
         ).resolve()
