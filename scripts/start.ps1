@@ -13,7 +13,7 @@ $Runtime = Join-Path $Repo '.runtime'
 $BrowserProfile = if ($env:CHAT_BROWSER_PROFILE) {
     $env:CHAT_BROWSER_PROFILE
 } else {
-    Join-Path $env:LOCALAPPDATA 'Intelligence Works\BrowserChatEdge\User Data'
+    Join-Path $env:LOCALAPPDATA 'BrowserChatBridge\BrowserChatEdge\User Data'
 }
 New-Item -ItemType Directory -Force -Path $Runtime | Out-Null
 
