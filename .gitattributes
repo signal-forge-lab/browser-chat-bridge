@@ -1,0 +1,4 @@
+# iw-spec-kit-eol:start
+.specify/** text eol=lf
+.dsh/skills/speckit-*/** text eol=lf
+# iw-spec-kit-eol:end
