@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -20,7 +21,7 @@ def _prompt_hash(prompt: str) -> str:
 
 
 def _turn_payload(row: dict[str, Any], *, cached: bool) -> dict[str, Any]:
-    return {
+    payload = {
         "request_id": row["request_id"],
         "run_id": row["run_id"],
         "status": row["status"],
@@ -30,6 +31,18 @@ def _turn_payload(row: dict[str, Any], *, cached: bool) -> dict[str, Any]:
         "error": row.get("error"),
         "cached": cached,
     }
+    raw = row.get("raw_result")
+    if isinstance(raw, str) and raw:
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            result = None
+        if isinstance(result, dict):
+            if "execution_kind" in result:
+                payload["execution_kind"] = result["execution_kind"]
+            if "remote_stopped" in result:
+                payload["remote_stopped"] = result["remote_stopped"]
+    return payload
 
 
 class BridgeService:

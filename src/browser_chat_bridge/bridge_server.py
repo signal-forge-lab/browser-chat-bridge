@@ -180,7 +180,7 @@ def main() -> None:
     db_path = Path(os.environ.get("CHAT_BRIDGE_DB", ".runtime/bridge.sqlite3"))
     browser_url = os.environ.get("CHAT_BRIDGE_BROWSER_URL", "http://127.0.0.1:8764")
     driver_url = os.environ.get("CHAT_BRIDGE_DRIVER_URL", "http://127.0.0.1:8766")
-    driver_timeout = float(os.environ.get("CHAT_BRIDGE_DRIVER_TIMEOUT_S", "420"))
+    driver_timeout = float(os.environ.get("CHAT_BRIDGE_DRIVER_TIMEOUT_S", "270"))
     runtime_timeout = float(os.environ.get("CHAT_BRIDGE_RUNTIME_TIMEOUT_S", "30"))
 
     BridgeHandler.service = BridgeService(BridgeStore(db_path))

@@ -313,6 +313,36 @@ class BridgeServiceTests(unittest.TestCase):
         )
         self.assertIsNone(store.get_run("run-1"))
 
+    def test_stopped_task_timeout_metadata_survives_response_and_cached_replay(self):
+        service, _store = self.make_service()
+        result = service.run_turn(
+            "run-task-timeout",
+            "req-task-timeout",
+            "hello",
+            lambda _request: {
+                "status": "TIMEOUT",
+                "execution_kind": "task",
+                "remote_stopped": True,
+                "conversation_id": None,
+                "conversation_url": None,
+                "content": None,
+                "error": "task exceeded deadline",
+            },
+        )
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertEqual(result["execution_kind"], "task")
+        self.assertIs(result["remote_stopped"], True)
+
+        replay = service.run_turn(
+            "run-task-timeout",
+            "req-task-timeout",
+            "hello",
+            lambda _request: self.fail("cached timeout must not redispatch"),
+        )
+        self.assertTrue(replay["cached"])
+        self.assertEqual(replay["execution_kind"], "task")
+        self.assertIs(replay["remote_stopped"], True)
+
     def test_cleanup_purges_local_only_run_after_proven_undispatched_status(self):
         for status in ("NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY"):
             with self.subTest(status=status):

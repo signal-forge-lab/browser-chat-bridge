@@ -167,7 +167,7 @@ def main() -> None:
     if backend not in {"chromium", "obscura"}:
         raise SystemExit("CHAT_DRIVER_BACKEND must be chromium or obscura")
     promotion_timeout = float(os.environ.get("CHAT_DRIVER_PROMOTION_TIMEOUT_S", "120"))
-    timeout = float(os.environ.get("CHAT_DRIVER_RESPONSE_TIMEOUT_S", "360"))
+    timeout = float(os.environ.get("CHAT_DRIVER_RESPONSE_TIMEOUT_S", "240"))
 
     DriverHandler.runtime = DriverRuntime(
         backend_kind=backend,
