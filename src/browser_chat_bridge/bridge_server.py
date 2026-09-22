@@ -9,7 +9,7 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from .bridge import BridgeService
+from .bridge import DEFAULT_MAX_IN_FLIGHT, BridgeService
 from .http_json import JsonHandler
 from .store import BridgeStore
 
@@ -182,8 +182,9 @@ def main() -> None:
     driver_url = os.environ.get("CHAT_BRIDGE_DRIVER_URL", "http://127.0.0.1:8766")
     driver_timeout = float(os.environ.get("CHAT_BRIDGE_DRIVER_TIMEOUT_S", "270"))
     runtime_timeout = float(os.environ.get("CHAT_BRIDGE_RUNTIME_TIMEOUT_S", "30"))
+    max_in_flight = int(os.environ.get("CHAT_BRIDGE_MAX_IN_FLIGHT", str(DEFAULT_MAX_IN_FLIGHT)))
 
-    BridgeHandler.service = BridgeService(BridgeStore(db_path))
+    BridgeHandler.service = BridgeService(BridgeStore(db_path), max_in_flight=max_in_flight)
     BridgeHandler.browser_url = browser_url
     BridgeHandler.driver_url = driver_url
     BridgeHandler.driver_timeout_s = driver_timeout

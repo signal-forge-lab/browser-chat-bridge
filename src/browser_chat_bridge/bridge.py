@@ -11,6 +11,7 @@ from .store import BridgeStore
 
 DriverCall = Callable[[dict[str, Any]], dict[str, Any]]
 PreDispatchCall = Callable[[], None]
+DEFAULT_MAX_IN_FLIGHT = 2
 LOCAL_ONLY_CLEANUP_STATUSES = frozenset(
     {"NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY", "COMPLETED"}
 )
@@ -48,7 +49,7 @@ def _turn_payload(row: dict[str, Any], *, cached: bool) -> dict[str, Any]:
 class BridgeService:
     """Run-scoped router. Browser/DOM knowledge stays in the Driver process."""
 
-    def __init__(self, store: BridgeStore, *, max_in_flight: int = 2):
+    def __init__(self, store: BridgeStore, *, max_in_flight: int = DEFAULT_MAX_IN_FLIGHT):
         if not isinstance(max_in_flight, int) or isinstance(max_in_flight, bool) or max_in_flight <= 0:
             raise ValueError("max_in_flight must be a positive integer")
         self.store = store
