@@ -204,7 +204,6 @@ class NodriverManagedEdge:
 
     async def _run(self) -> None:
         start_fn = self._start_fn
-        cdp_close = None
         attached_existing = self.attached_existing
         if start_fn is None:
             try:
@@ -214,7 +213,6 @@ class NodriverManagedEdge:
                     "Browser Chat Edge requires nodriver; install the project dependencies"
                 ) from exc
             start_fn = uc.start
-            cdp_close = uc.cdp.browser.close
 
         if attached_existing:
             parsed = urlparse(self.attach_endpoint)
@@ -226,7 +224,11 @@ class NodriverManagedEdge:
                 "headless": False,
                 "user_data_dir": str(self.profile_dir),
                 "browser_executable_path": self.browser_executable,
-                "browser_args": ["--no-first-run", "--no-default-browser-check"],
+                "browser_args": [
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    self.start_url,
+                ],
             }
 
         browser = await start_fn(**start_kwargs)
@@ -234,14 +236,12 @@ class NodriverManagedEdge:
             host = str(browser.config.host or "127.0.0.1")
             port = int(browser.config.port)
             self._endpoint = f"http://{host}:{port}"
-            if self.start_url and not attached_existing:
-                await browser.get(self.start_url, new_tab=True)
-            self._ready.set()
-            while not self._stop.is_set():
-                await asyncio.sleep(0.1)
-        finally:
-            if attached_existing:
-                close = getattr(browser, "aclose", None)
+
+            # Browser Host only needs this nodriver connection for launch or
+            # reattach. Detach it while leaving Edge itself running so Driver
+            # can attach its own short-lived nodriver CDP client per operation.
+            for tab in list(getattr(browser, "tabs", ())):
+                close = getattr(tab, "aclose", None)
                 if callable(close):
                     try:
                         close_result = close()
@@ -249,22 +249,23 @@ class NodriverManagedEdge:
                             await cast(Awaitable[Any], close_result)
                     except Exception:
                         pass
+            close = getattr(browser, "aclose", None)
+            if callable(close):
+                close_result = close()
+                if inspect.isawaitable(close_result):
+                    await cast(Awaitable[Any], close_result)
+
+            self._ready.set()
+            while not self._stop.is_set():
+                await asyncio.sleep(0.1)
+        finally:
+            if attached_existing:
+                # The attached browser is externally owned. Its nodriver CDP
+                # connection was already detached above; never stop the process.
+                pass
             else:
-                clean_exit = False
-                if cdp_close is not None:
-                    try:
-                        close_result = browser.send(cdp_close())
-                        if inspect.isawaitable(close_result):
-                            await cast(Awaitable[Any], close_result)
-                    except Exception:
-                        pass
-                    process = getattr(browser, "_process", None)
-                    if process is not None:
-                        try:
-                            await asyncio.wait_for(process.wait(), timeout=3.0)
-                            clean_exit = True
-                        except Exception:
-                            pass
-                if not clean_exit:
-                    browser.stop()
+                # Browser Host owns Edge in this branch. nodriver's socket is
+                # already detached, but stop() still terminates the owned
+                # browser process without affecting unrelated Edge instances.
+                browser.stop()
                 await asyncio.sleep(0.25)

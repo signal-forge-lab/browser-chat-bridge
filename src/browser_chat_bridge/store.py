@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,40 @@ class BridgeStore:
                     (run_id,),
                 ).fetchone()
             )
+
+    def get_recovery_protected_conversation_urls(self, *, max_age_seconds: float = 1800.0) -> list[str]:
+        """Return recent durable URLs whose latest turn may need reconciliation."""
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(0.0, float(max_age_seconds)))
+        with closing(self._connect()) as db:
+            rows = db.execute(
+                """
+                SELECT COALESCE(t.conversation_url, r.conversation_url) AS conversation_url,
+                       t.updated_at AS updated_at
+                FROM runs AS r
+                JOIN turns AS t
+                  ON t.request_id = (
+                    SELECT newest.request_id
+                    FROM turns AS newest
+                    WHERE newest.run_id = r.run_id
+                    ORDER BY newest.created_at DESC
+                    LIMIT 1
+                  )
+                WHERE t.status IN ('TIMEOUT', 'AMBIGUOUS')
+                  AND COALESCE(t.conversation_url, r.conversation_url) IS NOT NULL
+                  AND COALESCE(t.conversation_url, r.conversation_url) != ''
+                """
+            ).fetchall()
+        protected: set[str] = set()
+        for row in rows:
+            try:
+                updated_at = datetime.fromisoformat(str(row["updated_at"]))
+            except ValueError:
+                continue
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            if updated_at >= cutoff:
+                protected.add(str(row["conversation_url"]))
+        return sorted(protected)
 
     def begin_turn(self, run_id: str, request_id: str, prompt_hash: str) -> tuple[dict[str, Any], bool]:
         now = _now()

@@ -87,6 +87,153 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertTrue(second["cached"])
         self.assertEqual(len(calls), 1)
 
+    def test_bound_transport_failure_recovers_existing_response_without_redispatch(self):
+        service, _store = self.make_service()
+        service.run_turn(
+            "run-1",
+            "req-bind",
+            "bind",
+            lambda _request: {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "content": "bound",
+            },
+        )
+        driver_calls = []
+        recovery_calls = []
+
+        def driver(_request):
+            driver_calls.append(1)
+            raise ConnectionResetError("reply lost")
+
+        def recover(request):
+            recovery_calls.append(request)
+            return {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "content": "recovered answer",
+            }
+
+        result = service.run_turn(
+            "run-1",
+            "req-2",
+            "planner prompt",
+            driver,
+            recovery_call=recover,
+        )
+
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(result["content"], "recovered answer")
+        self.assertTrue(result["recovery_attempted"])
+        self.assertTrue(result["recovered"])
+        self.assertEqual(driver_calls, [1])
+        self.assertEqual(
+            recovery_calls,
+            [{
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "prompt": "planner prompt",
+            }],
+        )
+
+    def test_timeout_with_returned_binding_recovers_and_binds_unbound_run(self):
+        service, store = self.make_service()
+        recovery_calls = []
+
+        result = service.run_turn(
+            "run-1",
+            "req-1",
+            "planner prompt",
+            lambda _request: {
+                "status": "TIMEOUT",
+                "conversation_id": "slow123",
+                "conversation_url": "https://gemini.google.com/spark/chat/slow123",
+                "content": None,
+                "error": "response timed out",
+            },
+            recovery_call=lambda request: recovery_calls.append(request) or {
+                "status": "COMPLETED",
+                "conversation_id": "slow123",
+                "conversation_url": "https://gemini.google.com/spark/chat/slow123",
+                "content": "late answer",
+            },
+        )
+
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertTrue(result["recovered"])
+        self.assertEqual(store.get_run("run-1")["conversation_id"], "slow123")
+        self.assertEqual(len(recovery_calls), 1)
+
+    def test_recovery_timeout_preserves_no_resend_semantics(self):
+        service, _store = self.make_service()
+        service.run_turn(
+            "run-1",
+            "req-bind",
+            "bind",
+            lambda _request: {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "content": "bound",
+            },
+        )
+        driver_calls = []
+
+        def driver(_request):
+            driver_calls.append(1)
+            raise TimeoutError("lost reply")
+
+        result = service.run_turn(
+            "run-1",
+            "req-2",
+            "planner prompt",
+            driver,
+            recovery_call=lambda _request: {
+                "status": "TIMEOUT",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "content": None,
+                "error": "attributed but still incomplete",
+            },
+        )
+
+        self.assertEqual(result["status"], "TIMEOUT")
+        self.assertTrue(result["recovery_attempted"])
+        self.assertFalse(result["recovered"])
+        self.assertEqual(driver_calls, [1])
+
+    def test_turn_forwards_optional_response_timeout_to_driver(self):
+        service, _store = self.make_service()
+        seen = []
+
+        result = service.run_turn(
+            "run-timeout",
+            "req-timeout",
+            "hello",
+            lambda request: seen.append(dict(request)) or {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "content": "ok",
+            },
+            response_timeout_seconds=70.0,
+        )
+
+        self.assertEqual(result["status"], "COMPLETED")
+        self.assertEqual(seen[0]["response_timeout_seconds"], 70.0)
+
+    def test_turn_rejects_nonpositive_response_timeout(self):
+        service, _store = self.make_service()
+        with self.assertRaisesRegex(ValueError, "response_timeout_seconds"):
+            service.run_turn(
+                "run-timeout",
+                "req-timeout",
+                "hello",
+                lambda _request: {"status": "NOT_DISPATCHED"},
+                response_timeout_seconds=0.0,
+            )
+
     def test_predispatch_failure_is_not_dispatched_and_is_cached(self):
         service, _store = self.make_service()
         preflight_calls = []
@@ -152,6 +299,51 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIsNone(requests[0]["conversation_url"])
         self.assertIsNone(requests[1]["conversation_url"])
 
+    def test_two_unbound_first_turns_are_serialized_for_safe_correlation(self):
+        service, _store = self.make_service()
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+        call_order = []
+        results = {}
+
+        def driver(request):
+            suffix = request["prompt"]
+            call_order.append(suffix)
+            if suffix == "run-a":
+                first_entered.set()
+                release_first.wait(timeout=2)
+            else:
+                second_entered.set()
+            return {
+                "status": "COMPLETED",
+                "conversation_id": suffix,
+                "conversation_url": f"https://gemini.google.com/spark/chat/{suffix}",
+                "content": "done",
+            }
+
+        def run(run_id):
+            results[run_id] = service.run_turn(run_id, f"req-{run_id}", run_id, driver)
+
+        first = threading.Thread(target=run, args=("run-a",))
+        second = threading.Thread(target=run, args=("run-b",))
+        first.start()
+        self.assertTrue(first_entered.wait(timeout=2))
+        second.start()
+        try:
+            self.assertFalse(second_entered.wait(timeout=0.2))
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertTrue(second_entered.is_set())
+        self.assertEqual(call_order, ["run-a", "run-b"])
+        self.assertEqual(results["run-a"]["status"], "COMPLETED")
+        self.assertEqual(results["run-b"]["status"], "COMPLETED")
+
     def test_global_capacity_admits_two_turns_and_returns_busy_for_third(self):
         service, _store = self.make_service()
 
@@ -168,7 +360,8 @@ class BridgeServiceTests(unittest.TestCase):
                 },
             )
 
-        for run_id in ("run-a", "run-b", "run-c"):
+        run_ids = tuple(f"run-{index}" for index in range(3))
+        for run_id in run_ids:
             bind(run_id)
 
         entered = threading.Barrier(3)
@@ -194,25 +387,24 @@ class BridgeServiceTests(unittest.TestCase):
                 blocking_driver,
             )
 
-        first = threading.Thread(target=run_blocked, args=("run-a",))
-        second = threading.Thread(target=run_blocked, args=("run-b",))
-        first.start()
-        second.start()
+        active = [threading.Thread(target=run_blocked, args=(run_id,)) for run_id in run_ids[:2]]
+        for thread in active:
+            thread.start()
         try:
             entered.wait(timeout=2)
 
             third_calls = []
             third_preflight = []
             third = service.run_turn(
-                "run-c",
-                "run-c-busy",
+                run_ids[2],
+                f"{run_ids[2]}-busy",
                 "third",
                 lambda request: third_calls.append(request),
                 before_dispatch=lambda: third_preflight.append(1),
             )
             replay = service.run_turn(
-                "run-c",
-                "run-c-busy",
+                run_ids[2],
+                f"{run_ids[2]}-busy",
                 "third",
                 lambda request: third_calls.append(request),
             )
@@ -225,10 +417,9 @@ class BridgeServiceTests(unittest.TestCase):
             self.assertEqual(third_preflight, [])
         finally:
             release.set()
-            first.join(timeout=2)
-            second.join(timeout=2)
-        self.assertFalse(first.is_alive())
-        self.assertFalse(second.is_alive())
+            for thread in active:
+                thread.join(timeout=2)
+        self.assertTrue(all(not thread.is_alive() for thread in active))
 
     def test_cleanup_deletes_bound_remote_conversation_then_purges_local_run(self):
         service, store = self.make_service()
@@ -276,6 +467,108 @@ class BridgeServiceTests(unittest.TestCase):
         self.assertIsNotNone(store.get_run("run-1"))
         self.assertIsNotNone(store.get_turn("req-1"))
 
+    def test_release_run_target_preserves_conversation_and_cached_turns(self):
+        service, store = self.make_service()
+        service.run_turn(
+            "run-1",
+            "req-1",
+            "hello",
+            lambda _request: {
+                "status": "COMPLETED",
+                "conversation_id": "abc123",
+                "conversation_url": "https://gemini.google.com/spark/chat/abc123",
+                "content": "answer",
+            },
+        )
+        calls = []
+
+        result = service.release_run_target(
+            "run-1",
+            lambda request: calls.append(request) or {"status": "RELEASED"},
+        )
+
+        self.assertEqual(result, {"status": "RELEASED", "run_id": "run-1"})
+        self.assertEqual(
+            calls,
+            [{"conversation_url": "https://gemini.google.com/spark/chat/abc123"}],
+        )
+        self.assertEqual(store.get_run("run-1")["conversation_id"], "abc123")
+        self.assertEqual(store.get_turn("req-1")["content"], "answer")
+
+    def test_orphan_sweep_retains_only_currently_active_conversation_urls(self):
+        service, store = self.make_service()
+        service.run_turn(
+            "run-active",
+            "req-active",
+            "hello",
+            lambda _request: {
+                "status": "COMPLETED",
+                "conversation_id": "active123",
+                "conversation_url": "https://gemini.google.com/spark/chat/active123",
+                "content": "answer",
+            },
+        )
+        service._mark_active("run-active")
+        calls = []
+        try:
+            result = service.sweep_orphan_targets(
+                lambda request: calls.append(request) or {"status": "RELEASED"}
+            )
+        finally:
+            service._mark_inactive("run-active")
+
+        self.assertEqual(result, {"status": "RELEASED"})
+        self.assertEqual(
+            calls,
+            [{"active_conversation_urls": ["https://gemini.google.com/spark/chat/active123"]}],
+        )
+
+    def test_orphan_sweep_protects_bound_timeout_for_post_dispatch_recovery(self):
+        service, store = self.make_service()
+        service.run_turn(
+            "run-timeout",
+            "req-timeout",
+            "hello",
+            lambda _request: {
+                "status": "TIMEOUT",
+                "conversation_id": "slow123",
+                "conversation_url": "https://gemini.google.com/spark/chat/slow123",
+                "content": None,
+                "error": "response timed out",
+            },
+        )
+        self.assertEqual(
+            store.get_recovery_protected_conversation_urls(),
+            ["https://gemini.google.com/spark/chat/slow123"],
+        )
+        calls = []
+
+        result = service.sweep_orphan_targets(
+            lambda request: calls.append(request) or {"status": "RELEASED"}
+        )
+
+        self.assertEqual(result, {"status": "RELEASED"})
+        self.assertEqual(
+            calls,
+            [{"active_conversation_urls": ["https://gemini.google.com/spark/chat/slow123"]}],
+        )
+
+    def test_recovery_protection_expires_for_old_timeout(self):
+        service, store = self.make_service()
+        service.run_turn(
+            "run-timeout",
+            "req-timeout",
+            "hello",
+            lambda _request: {
+                "status": "TIMEOUT",
+                "conversation_id": "slow123",
+                "conversation_url": "https://gemini.google.com/spark/chat/slow123",
+                "content": None,
+            },
+        )
+
+        self.assertEqual(store.get_recovery_protected_conversation_urls(max_age_seconds=0), [])
+
     def test_cleanup_is_idempotent_for_unknown_or_already_purged_run(self):
         service, _store = self.make_service()
         calls = []
@@ -313,9 +606,9 @@ class BridgeServiceTests(unittest.TestCase):
         )
         self.assertIsNone(store.get_run("run-1"))
 
-    def test_stopped_task_timeout_metadata_survives_response_and_cached_replay(self):
-        service, _store = self.make_service()
-        result = service.run_turn(
+    def test_cleanup_purges_stopped_unbound_task_timeout_without_remote_delete(self):
+        service, store = self.make_service()
+        turn = service.run_turn(
             "run-task-timeout",
             "req-task-timeout",
             "hello",
@@ -329,19 +622,27 @@ class BridgeServiceTests(unittest.TestCase):
                 "error": "task exceeded deadline",
             },
         )
-        self.assertEqual(result["status"], "TIMEOUT")
-        self.assertEqual(result["execution_kind"], "task")
-        self.assertIs(result["remote_stopped"], True)
-
+        self.assertEqual(turn["execution_kind"], "task")
+        self.assertIs(turn["remote_stopped"], True)
         replay = service.run_turn(
             "run-task-timeout",
             "req-task-timeout",
             "hello",
             lambda _request: self.fail("cached timeout must not redispatch"),
         )
-        self.assertTrue(replay["cached"])
         self.assertEqual(replay["execution_kind"], "task")
         self.assertIs(replay["remote_stopped"], True)
+        self.assertTrue(replay["cached"])
+        cleanup_calls = []
+
+        result = service.cleanup_run(
+            "run-task-timeout",
+            lambda request: cleanup_calls.append(request),
+        )
+
+        self.assertEqual(result, {"status": "DELETED", "run_id": "run-task-timeout"})
+        self.assertEqual(cleanup_calls, [])
+        self.assertIsNone(store.get_run("run-task-timeout"))
 
     def test_cleanup_purges_local_only_run_after_proven_undispatched_status(self):
         for status in ("NOT_DISPATCHED", "TARGET_LOST", "AUTH_REQUIRED", "MODEL_MISMATCH", "BUSY"):

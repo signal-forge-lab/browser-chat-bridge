@@ -10,6 +10,8 @@ from .browser_host import endpoint_alive
 from .gemini import GeminiDriver
 from .http_json import JsonHandler
 
+DEFAULT_DRIVER_RESPONSE_TIMEOUT_S = 900.0
+
 
 def _loopback(host: str) -> bool:
     try:
@@ -94,6 +96,7 @@ class DriverHandler(JsonHandler):
                     "ready": self.runtime.ready,
                     "runtime_rebind": True,
                     "backend": self.backend_kind,
+                    "automation_backend": "nodriver",
                     "cdp_endpoint": self.runtime.cdp_endpoint or None,
                     "fixed_model": "Gemini 3.8 Flash (Spark implicit; no selector)",
                 },
@@ -136,6 +139,57 @@ class DriverHandler(JsonHandler):
                 return
             self.send_json(200, result)
             return
+        if self.path == "/v1/release-target":
+            try:
+                request = self.read_json()
+                driver = self.runtime.driver
+                if driver is None:
+                    self.send_json(503, {"status": "RELEASE_FAILED", "error": "driver is not bound to a browser"})
+                    return
+                result = driver.release_target(request)
+            except ValueError as exc:
+                self.send_json(400, {"status": "RELEASE_FAILED", "error": str(exc)})
+                return
+            except Exception as exc:
+                self.send_json(500, {"status": "RELEASE_FAILED", "error": type(exc).__name__})
+                return
+            self.send_json(200, result)
+            return
+        if self.path == "/v1/release-orphan-targets":
+            try:
+                request = self.read_json()
+                driver = self.runtime.driver
+                if driver is None:
+                    self.send_json(503, {"status": "RELEASE_FAILED", "error": "driver is not bound to a browser"})
+                    return
+                result = driver.release_orphan_targets(request)
+            except ValueError as exc:
+                self.send_json(400, {"status": "RELEASE_FAILED", "error": str(exc)})
+                return
+            except Exception as exc:
+                self.send_json(500, {"status": "RELEASE_FAILED", "error": type(exc).__name__})
+                return
+            self.send_json(200, result)
+            return
+        if self.path == "/v1/recover-turn":
+            try:
+                request = self.read_json()
+                driver = self.runtime.driver
+                if driver is None:
+                    self.send_json(
+                        503,
+                        {"status": "TARGET_LOST", "error": "driver is not bound to a browser"},
+                    )
+                    return
+                result = driver.recover_turn(request)
+            except ValueError as exc:
+                self.send_json(400, {"status": "AMBIGUOUS", "error": str(exc)})
+                return
+            except Exception as exc:
+                self.send_json(500, {"status": "AMBIGUOUS", "error": type(exc).__name__})
+                return
+            self.send_json(200, result)
+            return
         if self.path != "/v1/turn":
             self.send_json(404, {"error": "not found"})
             return
@@ -167,7 +221,12 @@ def main() -> None:
     if backend not in {"chromium", "obscura"}:
         raise SystemExit("CHAT_DRIVER_BACKEND must be chromium or obscura")
     promotion_timeout = float(os.environ.get("CHAT_DRIVER_PROMOTION_TIMEOUT_S", "120"))
-    timeout = float(os.environ.get("CHAT_DRIVER_RESPONSE_TIMEOUT_S", "240"))
+    timeout = float(
+        os.environ.get(
+            "CHAT_DRIVER_RESPONSE_TIMEOUT_S",
+            str(DEFAULT_DRIVER_RESPONSE_TIMEOUT_S),
+        )
+    )
 
     DriverHandler.runtime = DriverRuntime(
         backend_kind=backend,

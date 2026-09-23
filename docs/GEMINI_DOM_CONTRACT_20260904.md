@@ -21,7 +21,7 @@ The container exposes `data-test-id="textarea-inner"` and
 
 ## Send
 
-After a real Playwright fill the unique button is under:
+After a real nodriver/CDP fill the unique button is under:
 
 ```text
 div[data-test-id="send-button-container"]
@@ -85,6 +85,16 @@ conversation identity. File-tool executions can instead move to
 `https://gemini.google.com/spark/tasks`; those are single unbound tasks and do
 not create a durable run binding.
 
+Fresh Chromium targets are correlated by the `targetId` returned from
+`Target.createTarget`. The Driver follows only that target's URL transition, so
+two fresh runs can promote concurrently without relying on a global URL-set
+difference.
+
+An active Spark task exposes a stop-response button with Japanese accessible
+name `回答を停止` in the current authenticated profile. A timed-out automation-owned
+task may use that control for bounded cleanup; Human-owned or pre-existing tabs
+are never stopped by this path.
+
 The 2026-09-09 live probes also established that Spark can read files from the
 connected root when addressed as `Gドライブのルート\<folder>\<file>`. Direct
 plain-text Drive writes are currently unreliable, so DSH's workspace bridge
@@ -93,7 +103,7 @@ mutation tasks.
 
 ## Duplicate-send finding
 
-The first low-level synthetic send appeared not to progress. A later Playwright
+The first low-level synthetic send appeared not to progress. A later nodriver
 probe then showed that it had in fact persisted, resulting in two identical
 prompts. This is direct live evidence for the Converlay-style rule:
 

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Run-scoped bridge from local callers to browser-hosted chat UIs"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = ["playwright>=1.55", "nodriver>=0.50.3,<0.51"]
+dependencies = ["nodriver>=0.50.3,<0.51", "websockets>=15,<16"]
 
 [project.scripts]
 browser-chat-bridge = "browser_chat_bridge.bridge_server:main"

@@ -19,6 +19,7 @@ class FakeBrowser:
         self.urls = []
         self.stopped = False
         self.closed = False
+        self.tabs = []
 
     async def get(self, url, new_tab=False):
         self.urls.append((url, new_tab))
@@ -63,6 +64,7 @@ class BrowserHostTests(unittest.TestCase):
                 self.assertFalse(kwargs["headless"])
                 self.assertEqual(Path(kwargs["user_data_dir"]), (tmp_path / "profile").resolve())
                 self.assertEqual(kwargs["browser_executable_path"], __file__)
+                self.assertIn("https://gemini.google.com/spark", kwargs["browser_args"])
                 return fake
 
             managed = NodriverManagedEdge(
@@ -71,7 +73,8 @@ class BrowserHostTests(unittest.TestCase):
                 start_fn=start_fn,
             )
             self.assertEqual(managed.start(), "http://127.0.0.1:45678")
-            self.assertEqual(fake.urls, [("https://gemini.google.com/spark", True)])
+            self.assertEqual(fake.urls, [])
+            self.assertTrue(fake.closed)
             managed.stop()
             self.assertTrue(fake.stopped)
 
@@ -93,6 +96,7 @@ class BrowserHostTests(unittest.TestCase):
             self.assertEqual(managed.start(), "http://127.0.0.1:45678")
             self.assertEqual(calls, [{"host": "127.0.0.1", "port": 9222}])
             self.assertEqual(fake.urls, [])
+            self.assertTrue(fake.closed)
             managed.stop()
             self.assertTrue(fake.closed)
             self.assertFalse(fake.stopped)

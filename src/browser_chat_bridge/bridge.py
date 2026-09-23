@@ -10,6 +10,7 @@ from .store import BridgeStore
 
 
 DriverCall = Callable[[dict[str, Any]], dict[str, Any]]
+RecoveryCall = Callable[[dict[str, Any]], dict[str, Any]]
 PreDispatchCall = Callable[[], None]
 DEFAULT_MAX_IN_FLIGHT = 2
 LOCAL_ONLY_CLEANUP_STATUSES = frozenset(
@@ -43,7 +44,33 @@ def _turn_payload(row: dict[str, Any], *, cached: bool) -> dict[str, Any]:
                 payload["execution_kind"] = result["execution_kind"]
             if "remote_stopped" in result:
                 payload["remote_stopped"] = result["remote_stopped"]
+            if "recovery_attempted" in result:
+                payload["recovery_attempted"] = result["recovery_attempted"]
+            if "recovered" in result:
+                payload["recovered"] = result["recovered"]
+            if "recovery_status" in result:
+                payload["recovery_status"] = result["recovery_status"]
     return payload
+
+
+def _local_cleanup_allowed(turn: dict[str, Any] | None) -> bool:
+    if turn is None:
+        return False
+    if str(turn.get("status") or "") in LOCAL_ONLY_CLEANUP_STATUSES:
+        return True
+    raw = turn.get("raw_result")
+    if not isinstance(raw, str) or not raw:
+        return False
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return (
+        isinstance(result, dict)
+        and result.get("status") == "TIMEOUT"
+        and result.get("execution_kind") == "task"
+        and result.get("remote_stopped") is True
+    )
 
 
 class BridgeService:
@@ -58,9 +85,13 @@ class BridgeService:
         self._run_locks: dict[str, threading.Lock] = {}
         self._capacity_guard = threading.Lock()
         self._in_flight = 0
-        # Spark may promote a new /spark send into a separate durable target.
-        # Serialize only unbound first turns so that target promotion can be
-        # correlated without cross-run ambiguity; bound runs still parallelize.
+        self._active_run_guard = threading.Lock()
+        self._active_runs: set[str] = set()
+        # A fresh Gemini/Spark turn has no durable conversation binding yet.
+        # Serialize only those unbound first turns so target/task promotion can
+        # be correlated without another run creating a second "new" task at
+        # the same time. Bound conversations remain free to use the global
+        # max_in_flight capacity in parallel.
         self._new_conversation_lock = threading.Lock()
 
     def _lock_for(self, run_id: str) -> threading.Lock:
@@ -78,6 +109,25 @@ class BridgeService:
         with self._capacity_guard:
             self._in_flight -= 1
 
+    def _mark_active(self, run_id: str) -> None:
+        with self._active_run_guard:
+            self._active_runs.add(run_id)
+
+    def _mark_inactive(self, run_id: str) -> None:
+        with self._active_run_guard:
+            self._active_runs.discard(run_id)
+
+    def active_conversation_urls(self) -> list[str]:
+        with self._active_run_guard:
+            run_ids = tuple(self._active_runs)
+        urls: list[str] = []
+        for run_id in run_ids:
+            run = self.store.get_run(run_id)
+            url = str((run or {}).get("conversation_url") or "")
+            if url:
+                urls.append(url)
+        return sorted(set(urls))
+
     def run_turn(
         self,
         run_id: str,
@@ -86,9 +136,13 @@ class BridgeService:
         driver_call: DriverCall,
         *,
         before_dispatch: PreDispatchCall | None = None,
+        recovery_call: RecoveryCall | None = None,
+        response_timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         if not run_id.strip() or not request_id.strip() or not prompt.strip():
             raise ValueError("run_id, request_id, and prompt are required")
+        if response_timeout_seconds is not None and response_timeout_seconds <= 0:
+            raise ValueError("response_timeout_seconds must be positive when provided")
 
         with self._lock_for(run_id):
             turn, created = self.store.begin_turn(run_id, request_id, _prompt_hash(prompt))
@@ -110,6 +164,7 @@ class BridgeService:
                 return _turn_payload(row, cached=False)
 
             try:
+                self._mark_active(run_id)
                 if before_dispatch is not None:
                     try:
                         before_dispatch()
@@ -131,6 +186,8 @@ class BridgeService:
                     "conversation_url": None if run is None else run.get("conversation_url"),
                     "prompt": prompt,
                 }
+                if response_timeout_seconds is not None:
+                    request["response_timeout_seconds"] = response_timeout_seconds
                 try:
                     if request["conversation_url"] is None:
                         with self._new_conversation_lock:
@@ -148,6 +205,49 @@ class BridgeService:
                         "content": None,
                         "error": f"driver result unavailable after dispatch attempt: {type(exc).__name__}",
                     }
+
+                status = str(result.get("status") or "")
+                remote_stopped = result.get("remote_stopped") is True
+                recovery_url = str(
+                    result.get("conversation_url")
+                    or (None if run is None else run.get("conversation_url"))
+                    or ""
+                )
+                if (
+                    recovery_call is not None
+                    and status in {"TIMEOUT", "AMBIGUOUS"}
+                    and not remote_stopped
+                    and recovery_url
+                ):
+                    try:
+                        recovery = dict(
+                            recovery_call(
+                                {
+                                    "conversation_url": recovery_url,
+                                    "prompt": prompt,
+                                }
+                            )
+                        )
+                    except Exception as exc:
+                        result = {
+                            **result,
+                            "recovery_attempted": True,
+                            "recovery_status": f"ERROR:{type(exc).__name__}",
+                        }
+                    else:
+                        recovery_status = str(recovery.get("status") or "")
+                        if recovery_status in {"COMPLETED", "TIMEOUT"}:
+                            result = {
+                                **recovery,
+                                "recovery_attempted": True,
+                                "recovered": recovery_status == "COMPLETED",
+                            }
+                        else:
+                            result = {
+                                **result,
+                                "recovery_attempted": True,
+                                "recovery_status": recovery_status or "INVALID",
+                            }
 
                 if result.get("status") == "COMPLETED":
                     conversation_id = str(result.get("conversation_id") or "")
@@ -179,7 +279,42 @@ class BridgeService:
                 assert row is not None
                 return _turn_payload(row, cached=False)
             finally:
+                self._mark_inactive(run_id)
                 self._release_capacity()
+
+    def release_run_target(self, run_id: str, driver_call: DriverCall) -> dict[str, Any]:
+        """Release a bound browser target while preserving run/conversation history."""
+        if not run_id.strip():
+            raise ValueError("run_id is required")
+        with self._lock_for(run_id):
+            run = self.store.get_run(run_id)
+            if run is None:
+                return {"status": "NOT_FOUND", "run_id": run_id}
+            conversation_url = str(run.get("conversation_url") or "")
+            if not conversation_url:
+                latest = self.store.get_latest_turn_for_run(run_id)
+                conversation_url = str((latest or {}).get("conversation_url") or "")
+            if not conversation_url:
+                return {"status": "NOT_BOUND", "run_id": run_id}
+            try:
+                result = dict(driver_call({"conversation_url": conversation_url}))
+            except Exception as exc:
+                return {
+                    "status": "RELEASE_FAILED",
+                    "run_id": run_id,
+                    "error": f"driver release unavailable: {type(exc).__name__}",
+                }
+            return {**result, "run_id": run_id}
+
+    def sweep_orphan_targets(self, driver_call: DriverCall) -> dict[str, Any]:
+        """Release Driver-owned tabs that are not serving an active Bridge turn."""
+        protected = set(self.active_conversation_urls())
+        protected.update(self.store.get_recovery_protected_conversation_urls())
+        request = {"active_conversation_urls": sorted(protected)}
+        try:
+            return dict(driver_call(request))
+        except Exception as exc:
+            return {"status": "RELEASE_FAILED", "error": f"driver sweep unavailable: {type(exc).__name__}"}
 
     def cleanup_run(self, run_id: str, driver_call: DriverCall) -> dict[str, Any]:
         """Delete a bound cloud conversation, or purge a proven local-only run."""
@@ -199,7 +334,7 @@ class BridgeService:
                 latest_turn = self.store.get_latest_turn_for_run(run_id)
                 conversation_url = str((latest_turn or {}).get("conversation_url") or "")
             if not conversation_url:
-                if str((latest_turn or {}).get("status") or "") in LOCAL_ONLY_CLEANUP_STATUSES:
+                if _local_cleanup_allowed(latest_turn):
                     self.store.delete_run(run_id)
                     return {"status": "DELETED", "run_id": run_id}
                 return {

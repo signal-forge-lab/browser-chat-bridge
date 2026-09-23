@@ -13,8 +13,11 @@ from .bridge import DEFAULT_MAX_IN_FLIGHT, BridgeService
 from .http_json import JsonHandler
 from .store import BridgeStore
 
+DEFAULT_BRIDGE_DRIVER_TIMEOUT_S = 960.0
+
 
 RUN_TURN_RE = re.compile(r"^/v1/runs/([^/]+)/turn$")
+RUN_RELEASE_RE = re.compile(r"^/v1/runs/([^/]+)/release-target$")
 RUN_RE = re.compile(r"^/v1/runs/([^/]+)$")
 
 
@@ -67,6 +70,69 @@ def _driver_cleanup_call(driver_url: str, timeout_s: float, request: dict) -> di
     return value
 
 
+def _driver_release_call(driver_url: str, timeout_s: float, request: dict) -> dict:
+    body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        driver_url.rstrip("/") + "/v1/release-target",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as response:
+        value = json.loads(response.read().decode("utf-8"))
+    if not isinstance(value, dict) or not value.get("status"):
+        raise RuntimeError("driver returned an invalid release result")
+    return value
+
+
+def _driver_sweep_call(driver_url: str, timeout_s: float, request: dict) -> dict:
+    body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        driver_url.rstrip("/") + "/v1/release-orphan-targets",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout_s) as response:
+        value = json.loads(response.read().decode("utf-8"))
+    if not isinstance(value, dict) or not value.get("status"):
+        raise RuntimeError("driver returned an invalid sweep result")
+    return value
+
+
+def _driver_recovery_call(driver_url: str, timeout_s: float, request: dict) -> dict:
+    body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(
+        driver_url.rstrip("/") + "/v1/recover-turn",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            value = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            raise RuntimeError(f"driver recovery HTTP {exc.code}") from exc
+    if not isinstance(value, dict) or not value.get("status"):
+        raise RuntimeError("driver returned an invalid recovery result")
+    return value
+
+
+def _recover_after_runtime_refresh(
+    browser_url: str,
+    driver_url: str,
+    runtime_timeout_s: float,
+    driver_timeout_s: float,
+    request: dict,
+) -> dict:
+    """Refresh the Driver binding before read-only post-dispatch recovery."""
+    _ensure_runtime(browser_url, driver_url, runtime_timeout_s)
+    return _driver_recovery_call(driver_url, driver_timeout_s, request)
+
+
 def _post_json(url: str, timeout_s: float, request: dict) -> dict:
     body = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     req = urllib.request.Request(
@@ -116,12 +182,38 @@ class BridgeHandler(JsonHandler):
                     "driver_url": self.driver_url,
                     "browser_url": self.browser_url,
                     "lazy_browser": True,
+                    "max_in_flight": self.service.max_in_flight,
                 },
             )
             return
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
+        release_match = RUN_RELEASE_RE.fullmatch(self.path)
+        if release_match is not None:
+            run_id = release_match.group(1)
+            try:
+                _ensure_runtime(self.browser_url, self.driver_url, self.runtime_timeout_s)
+                result = self.service.release_run_target(
+                    run_id,
+                    lambda request: _driver_release_call(self.driver_url, self.runtime_timeout_s, request),
+                )
+            except ValueError as exc:
+                self.send_json(400, {"status": "RELEASE_FAILED", "error": str(exc)})
+                return
+            self.send_json(200, result)
+            return
+        if self.path == "/v1/release-orphan-targets":
+            try:
+                _ensure_runtime(self.browser_url, self.driver_url, self.runtime_timeout_s)
+                result = self.service.sweep_orphan_targets(
+                    lambda request: _driver_sweep_call(self.driver_url, self.runtime_timeout_s, request)
+                )
+            except ValueError as exc:
+                self.send_json(400, {"status": "RELEASE_FAILED", "error": str(exc)})
+                return
+            self.send_json(200, result)
+            return
         match = RUN_TURN_RE.fullmatch(self.path)
         if match is None:
             self.send_json(404, {"error": "not found"})
@@ -131,6 +223,10 @@ class BridgeHandler(JsonHandler):
             run_id = match.group(1)
             request_id = str(body.get("request_id") or "")
             prompt = str(body.get("prompt") or "")
+            response_timeout_raw = body.get("response_timeout_seconds")
+            response_timeout_seconds = (
+                None if response_timeout_raw is None else float(response_timeout_raw)
+            )
 
             def ensure_runtime() -> None:
                 _ensure_runtime(
@@ -145,6 +241,14 @@ class BridgeHandler(JsonHandler):
                 prompt,
                 lambda request: _driver_call(self.driver_url, self.driver_timeout_s, request),
                 before_dispatch=ensure_runtime,
+                recovery_call=lambda request: _recover_after_runtime_refresh(
+                    self.browser_url,
+                    self.driver_url,
+                    self.runtime_timeout_s,
+                    self.driver_timeout_s,
+                    request,
+                ),
+                response_timeout_seconds=response_timeout_seconds,
             )
         except ValueError as exc:
             self.send_json(409, {"status": "REQUEST_CONFLICT", "error": str(exc)})
@@ -180,7 +284,12 @@ def main() -> None:
     db_path = Path(os.environ.get("CHAT_BRIDGE_DB", ".runtime/bridge.sqlite3"))
     browser_url = os.environ.get("CHAT_BRIDGE_BROWSER_URL", "http://127.0.0.1:8764")
     driver_url = os.environ.get("CHAT_BRIDGE_DRIVER_URL", "http://127.0.0.1:8766")
-    driver_timeout = float(os.environ.get("CHAT_BRIDGE_DRIVER_TIMEOUT_S", "270"))
+    driver_timeout = float(
+        os.environ.get(
+            "CHAT_BRIDGE_DRIVER_TIMEOUT_S",
+            str(DEFAULT_BRIDGE_DRIVER_TIMEOUT_S),
+        )
+    )
     runtime_timeout = float(os.environ.get("CHAT_BRIDGE_RUNTIME_TIMEOUT_S", "30"))
     max_in_flight = int(os.environ.get("CHAT_BRIDGE_MAX_IN_FLIGHT", str(DEFAULT_MAX_IN_FLIGHT)))
 
